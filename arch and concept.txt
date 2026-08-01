@@ -1,0 +1,238 @@
+# WhatsApp AI Visual Search Marketplace — Architecture & Build Spec
+
+**Purpose of this document:** this is the reference spec for a coding agent to follow when implementing the system. It defines the architecture, components, data model, conversation grammar, and build order. Treat section 12 (roadmap) as the execution order — do not build later phases before earlier ones are working end to end.
+
+---
+
+## 1. Concept
+
+Buyers and merchants interact entirely through WhatsApp — no app install. A buyer sends a photo (or types a description) and gets ranked, in-stock product matches from nearby merchants. Merchants manage their catalog via a small command grammar sent as WhatsApp messages. The system connects buyer intent to merchant inventory using AI visual search (embeddings + vector search) combined with business filtering (price, location, stock).
+
+**Two user roles on one WhatsApp Business number:**
+- **Merchant** — registers a shop, posts/edits/removes products via commands.
+- **Buyer** — sends photos and/or natural language, browses ranked results, taps interest, gets connected to the merchant.
+
+---
+
+## 2. High-level architecture
+
+```
+WhatsApp Business Platform (Cloud API)
+        │
+        ▼
+Webhook gateway  — verify signature, dedupe by message ID, enqueue, return 200 immediately
+        │
+        ▼
+Message queue  — async job buffer, decouples ingestion from processing
+        │
+   ┌────┼─────────────┐
+   ▼    ▼              ▼
+Vision   NLU/query    Notification
+pipeline router        service
+   │        │              │
+   └────────┼──────────────┘
+            ▼
+      Data layer
+  ┌─────────────┬──────────────┐
+  │ Qdrant       │ Postgres +   │
+  │ (vectors,    │ PostGIS      │
+  │ payload      │ (system of   │
+  │ filter)      │ record, geo) │
+  ├─────────────┼──────────────┤
+  │ Redis        │ Object       │
+  │ (session     │ storage/CDN  │
+  │ state)       │ (images)     │
+  └─────────────┴──────────────┘
+            │
+            ▼
+   Moderation & approval
+   (new merchants, new listings)
+            │
+            ▼
+   Reply / notification sent back via WhatsApp API (async, respects 24h window)
+```
+
+**Design principle:** the webhook gateway does nothing but verify + enqueue. All real work — image processing, NLU, DB writes, moderation checks, outbound messages — happens in queue workers. This is non-negotiable for production: WhatsApp retries webhooks aggressively on slow responses, and synchronous processing under a webhook handler will cause duplicate/lost events under load.
+
+---
+
+## 3. Component responsibilities
+
+### 3.1 WhatsApp integration layer
+- Use the official **WhatsApp Business Platform (Cloud API)** via Meta directly, or a BSP (Twilio, 360dialog, Gupshup, Infobip). No unofficial/browser-automation libraries in production.
+- One phone number serves both merchants and buyers; routing is done by looking up the sender's number against the `merchants` table.
+- Respect the **24-hour customer service window**: free-form replies only within 24h of the user's last inbound message. Outside that window, only pre-approved **message templates** may be sent (used for restock alerts, merchant lead notifications sent late, etc.). Get template approval from Meta before launch — this is a lead-time item, not a code task.
+
+### 3.2 Webhook gateway
+- Verifies `X-Hub-Signature-256`.
+- Deduplicates by WhatsApp message ID (idempotency — required, WhatsApp retries deliveries).
+- Pushes the raw event onto the queue.
+- Returns 200 immediately. No business logic here.
+
+### 3.3 Message queue
+- SQS, RabbitMQ, or Redis-backed (BullMQ) — any is acceptable; pick based on what the team already operates.
+- Each pipeline stage (moderation, crop, embed, search, rerank, notify) should be its own retryable job with a dead-letter queue. Do not chain stages as one giant synchronous job — image pipelines fail in ways plain API calls don't (corrupt uploads, model timeouts, malformed captions), and you want granular retry, not "start over."
+
+### 3.4 Worker pool
+
+**Vision pipeline** (triggered on inbound image, merchant or buyer):
+1. Download image from WhatsApp Media API and persist immediately to object storage (WhatsApp media URLs expire — do not rely on them past the initial download).
+2. Object crop/detection (isolate the product from background clutter — required, not optional; an uncropped scene photo produces a noisy, low-quality embedding).
+3. Dual embedding: **SigLIP** for the primary image+text joint embedding used in ANN search; **DINOv2** computed on the shortlist only, as a fine-grained visual similarity signal for the reranker (do not run DINOv2 as a second full search — it's a rerank-stage signal, not a retrieval-stage one).
+4. Merchant uploads → embedding stored in Qdrant with payload (price, brand, category, stock, location). Buyer uploads → embedding used as a query vector.
+
+**NLU / query router** (triggered on inbound text, or following an image):
+1. Classify intent: new search, refinement of active session filters, "I'm interested" on a shown result, merchant command, general question.
+2. Extract entities from free text (color, brand, price ceiling, size) and merge with the session's active filters in Redis.
+3. Assemble the Qdrant query (vector + payload filter) and call the search/rerank flow.
+
+**Notification service:**
+1. On buyer "interested" tap, checks the 24h window for the merchant, sends either a free-form or template message with product + buyer contact preference.
+2. Handles merchant-facing alerts (new lead, moderation decision, stock warnings).
+
+### 3.5 Search pipeline (detail)
+```
+Object crop → Dual embedding (SigLIP + DINOv2)
+    → Qdrant ANN search (payload-filtered on brand/price/category/stock)
+    → Reranker (blend vector score + DINOv2 fine-grained score + business weights:
+       distance, stock, merchant rating — soft-scored, not hard cutoffs)
+    → Fetch full record from Postgres
+    → Format WhatsApp reply (ranked list, no fabricated "% match" — use
+       qualitative labels: "Closest match" / "Similar style")
+```
+- **Hybrid, not hard filtering.** Price/location/etc. should nudge ranking, not exclude a near-miss result outright (a buyer's "under 300k" shouldn't hide an item at 310k).
+- **Never display a bare similarity percentage as if it were certainty.** Use ranked qualitative labels instead — this is a trust decision, not a cosmetic one, in a market driven by word of mouth.
+
+### 3.6 Data layer
+- **Qdrant** — embeddings + filterable payload (brand, price, category, stock, merchant location). Optimized for filtered ANN search at scale.
+- **Postgres + PostGIS** — system of record: merchants, products, orders/leads, conversation logs, moderation state. PostGIS for real distance/geo queries once you operate in more than one city; a simple bounding query is fine for a single city.
+- **Redis** — per-phone-number conversation session state (active filters, wizard step, last search context). TTL ~30 min of inactivity for search context; merchant "mode" state persists longer.
+- **Object storage + CDN** — all merchant and buyer images, downloaded from WhatsApp immediately on receipt.
+
+### 3.7 Moderation & approval
+- New merchant registrations are **held for approval** before their products are searchable.
+- Every merchant-uploaded image runs through automated moderation (prohibited content / NSFW check) before indexing.
+- A buyer-side report/flag path and an admin path to deactivate bad-actor merchants quickly.
+
+---
+
+## 4. Data model (starting schema — Postgres)
+
+```
+merchants
+  id, phone_number (unique), business_name, category, location (PostGIS point),
+  status (approved | suspended | banned), created_at
+  -- default status is 'approved' set by automation on @register completion; admin overrides to suspended/banned via dashboard.
+
+products
+  id, merchant_id (FK), name, brand, category, price, currency, stock_qty,
+  status (pending_moderation | active | inactive), qdrant_point_id, created_at, updated_at
+
+product_images
+  id, product_id (FK), storage_url, is_primary, moderation_status, created_at
+
+conversations
+  id, phone_number, role (merchant | buyer), last_message_at, whatsapp_window_expires_at
+
+conversation_logs
+  id, phone_number, direction (in | out), message_type (text | image | template),
+  payload, created_at   -- for debugging NLU and replaying issues
+
+interest_events   -- buyer "I'm interested" taps
+  id, buyer_phone, product_id, merchant_id, status (sent | responded), created_at
+
+moderation_queue
+  id, entity_type (merchant | product), entity_id, status, reviewed_by, reviewed_at
+```
+
+Qdrant collection: one vector per product image (or averaged per product), payload = `{merchant_id, brand, category, price, stock_qty, lat, lng}`.
+
+---
+
+## 5. Merchant command grammar
+
+Keep this a **fixed, explicit grammar** — do not attempt natural language parsing for structured merchant data entry; it produces bad data.
+
+| Command | Behavior |
+|---|---|
+| `@register` | Multi-step wizard (session-driven): business name → category → location pin → confirm. Account enters `pending` until admin-approved. |
+| `@post [image] [caption]` | Caption parsed for name/price/tags if formatted; bot asks for missing required fields. New listing enters `pending_moderation`. |
+| `@edit [product_id] [field] [value]` | Update a field on an existing listing. |
+| `@stock [product_id] [qty]` | Update stock quantity. |
+| `@price [product_id] [amount]` | Update price. |
+| `@delete [product_id]` | Deactivate a listing. |
+| `@help` | Lists available commands. |
+| Unrecognized input while in merchant mode | Reply with `@help` text, never fail silently. |
+
+## 6. Buyer conversation design
+
+- Free text and images are both valid entry points; either can start or refine a search.
+- Session filters (Redis) persist across turns until timeout, so "in black" after a photo search refines rather than restarts.
+- Every result card includes a tappable "Interested" action → triggers the notification service.
+- Never expose raw similarity scores; use ranked qualitative labels.
+
+---
+
+## 7. Non-functional requirements
+
+- **Idempotency**: every inbound WhatsApp message ID deduped before processing (retries are expected, not exceptional).
+- **Rate limiting** per phone number, on both inbound command handling and outbound sends.
+- **Observability**: trace every conversation end-to-end (webhook → queue → worker → reply) with a correlation ID = WhatsApp message ID. This is the first thing you'll need when debugging "why didn't this user get a response."
+- **Cost tracking**: WhatsApp charges per conversation (business-initiated vs user-initiated pricing differs) — instrument this from day one.
+- **Compliance**: Uganda's Data Protection and Privacy Act (2019) applies to stored phone numbers and GPS data — do a compliance pass before scaling data collection, not after.
+- **Localization**: scope English + Luganda support even if English ships first.
+
+---
+
+## 8. Tech stack summary
+
+| Layer | Choice |
+|---|---|
+| Backend | Python + FastAPI (async-native, best AI ecosystem fit) |
+
+| Queue | SQS / RabbitMQ / BullMQ+Redis (pick one based on ops familiarity) |
+| Vision embeddings | SigLIP (primary, image+text joint space) + DINOv2 (rerank-stage fine similarity) |
+| Object detection/crop | Florence-2 or YOLOv11 (pretrained, no fine-tuning needed initially) |
+| Vector DB | Qdrant (payload-filtered ANN search) |
+| Relational DB | PostgreSQL + PostGIS |
+| Session store | Redis |
+| Object storage | S3-compatible + CDN |
+| WhatsApp | Cloud API direct, or BSP (Twilio/360dialog/Gupshup/Infobip) |
+
+---
+
+## 9. Build roadmap (execution order for the coding agent)
+
+**Phase 1 — Foundations**
+1. Webhook gateway: signature verification, dedupe, queue push, 200 response.
+2. Merchant `@register` wizard + Postgres schema (merchants, products tables) + admin approval flow (manual is fine initially).
+3. `@post` command with image upload → object storage, no AI yet — just store + list.
+
+**Phase 2 — AI pipeline**
+4. Crop/detect step on uploaded images.
+5. SigLIP embedding generation + Qdrant collection + indexing on merchant post.
+6. Buyer image search: embed → Qdrant ANN search → return raw ranked results (no rerank yet).
+7. Add DINOv2 fine-grained scoring + business-rule reranker.
+8. Buyer free-text NLU: intent classification, entity extraction, session filter merge (Redis).
+
+**Phase 3 — Production hardening**
+9. Automated image moderation gate (pre-indexing).
+10. Notification service + 24h window handling + Meta template approval integration.
+11. Observability (correlation IDs, structured logs, basic dashboards).
+12. Rate limiting, cost tracking, PostGIS distance queries if multi-city.
+
+Do not start Phase 3 items before Phase 1–2 are functioning end to end with real test merchants and buyers — moderation and notification infrastructure is easiest to build against a system that already has real traffic patterns to observe.
+
+---
+
+## 10. Open decisions the coding agent should surface, not assume
+
+- Which WhatsApp BSP (or direct Meta) — affects webhook payload shape and pricing.
+- Which queue technology — affects worker deployment shape.
+- Self-hosted Qdrant vs Qdrant Cloud — affects ops burden.
+- Whether reranking starts as a hand-tuned scoring formula (recommended) or a trained model (defer until real query/click logs exist).
+
+
+Note we should use docker container for all our service and server 
+
+We need an LLM / AI Sales Agent to interact with user and respond with user in natural language.

@@ -1,0 +1,2175 @@
+{
+  "info": {
+    "name": "whatAppseller REST API",
+    "_postman_id": "whatappseller-rest-api-v1",
+    "description": "whatAppseller Dual-Channel REST API (port 8002)\n\nThree user roles: Client, Merchant, Admin\nPhone number = identity. Verified via WhatsApp OTP.\n\n## Quick Start\n1. `POST /api/auth/request-otp` \u00e2\u2020\u2019 sends OTP via WhatsApp\n2. `POST /api/auth/verify-otp` \u00e2\u2020\u2019 returns JWT access + refresh tokens\n3. Set `access_token` and `refresh_token` collection variables\n4. All authenticated endpoints use Bearer token\n\n## Auth Flow\n- Access token: 15 min expiry\n- Refresh token: 30 days, stored in Redis\n- `POST /api/auth/refresh` \u00e2\u2020\u2019 new access token\n\n## Roles\n- **client**: Browse, search, express interest\n- **merchant**: Manage products, view dashboard, subscription\n- **admin**: Full dashboard (separate admin endpoints on port 8001)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8002",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "client_phone",
+      "value": "256700111222",
+      "type": "string"
+    },
+    {
+      "key": "merchant_phone",
+      "value": "256700333444",
+      "type": "string"
+    },
+    {
+      "key": "product_id",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "image_id",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "result_code",
+      "value": "RS-TEST",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "description": "Single conversational endpoint.\n\nSend text and/or images. The system handles:\n- Greeting -> welcome text\n- Help -> instructions\n- Product description -> searches + returns results with result_code\n- Image upload -> visual search\n- RS- code -> recalls previous search\n- 'my last search' -> fetches most recent result\n\nResponse includes reply_type, response_text, result_code (for search_results), and sections.",
+      "item": [
+        {
+          "name": "Chat Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "I need red Nike sneakers under 150k UGX",
+                  "type": "text",
+                  "description": "Natural language message (optional if files attached)"
+                },
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": [],
+                  "description": "Optional product images to search by"
+                },
+                {
+                  "key": "lat",
+                  "value": "0.3476",
+                  "type": "text",
+                  "description": "Buyer latitude (optional)"
+                },
+                {
+                  "key": "lng",
+                  "value": "32.5825",
+                  "type": "text",
+                  "description": "Buyer longitude (optional)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/chat",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "Single conversational endpoint for the frontend chat.\n\nOn success, returns reply_type='search_results' with:\n- result_code (e.g. RS-A3K2) - share with a merchant\n- response_text - conversational summary\n- sections - matching products with images, prices, merchant details\n\nSupports lat/lng for location-aware distance calculations."
+          }
+        },
+        {
+          "name": "Chat Recall by Code",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "RS-A3K2",
+                  "type": "text",
+                  "description": "Enter an RS- code to recall a previous search"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/chat",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "Recall a previous search by typing its RS- code.\nReturns the original search context: query, category, sample products, etc."
+          }
+        },
+        {
+          "name": "Chat Recall Last Search",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "show me my last search",
+                  "type": "text",
+                  "description": "Phrases like 'my last search' or 'like before' trigger recall"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/chat",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "chat"
+              ]
+            },
+            "description": "Recall the most recent search result. Detects phrases like:\n- 'my last search'\n- 'show me my previous results'\n- 'the one from before'"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Authentication endpoints. Phone number = identity.\nOTP sent via WhatsApp, expires in 5 minutes.\nRate limited: 3 OTPs per phone per 15 minutes.",
+      "item": [
+        {
+          "name": "Request OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.message) {",
+                  "    console.log('OTP sent: ' + jsonData.message);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{client_phone}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/request-otp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "request-otp"
+              ]
+            },
+            "description": "Send a 6-digit OTP to the given phone number via WhatsApp.\n\nRate limited: max 3 requests per phone per 15 minutes.\nReturns 400 for invalid phone format, 429 for rate limit."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify OTP (Client)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.access_token) {",
+                  "    pm.collectionVariables.set('access_token', jsonData.access_token);",
+                  "    pm.collectionVariables.set('refresh_token', jsonData.refresh_token);",
+                  "    console.log('Tokens saved. User: ' + jsonData.user.name + ' (' + jsonData.user.role + ')');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{client_phone}}\",\n  \"code\": \"000000\",\n  \"role\": \"client\",\n  \"name\": \"Test Buyer\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/verify-otp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "verify-otp"
+              ]
+            },
+            "description": "Verify OTP code and get JWT tokens.\n\nCreates a new user if phone not registered.\nReturns 401 for wrong/expired code, 403 if banned.\n\nReplace `code` with the actual 6-digit OTP received via WhatsApp.\nSet `role` to `client` or `merchant`."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify OTP (Merchant)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.access_token) {",
+                  "    console.log('Merchant tokens saved. User: ' + jsonData.user.name);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{merchant_phone}}\",\n  \"code\": \"000000\",\n  \"role\": \"merchant\",\n  \"name\": \"Test Merchant\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/verify-otp",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "verify-otp"
+              ]
+            },
+            "description": "Verify OTP for a merchant account.\nSet role to `merchant` to create/access a merchant identity."
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/refresh",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Get a new access token using refresh token.\nRefresh tokens are valid for 30 days.\nReturns 401 if refresh token is revoked or expired."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Current User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.id) {",
+                  "    console.log('User: ' + jsonData.name + ' | Role: ' + jsonData.role + ' | Phone: ' + jsonData.phone);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/auth/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Get the currently authenticated user's profile.\nRequires valid access token in Authorization header."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "description": "Product management endpoints.\n\nPublic endpoints (no auth): /public/latest, /public/category/{category}, /{product_id}\nMerchant endpoints (merchant auth required): list, create, update, delete, image upload/delete",
+      "item": [
+        {
+          "name": "List My Products",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ]
+            },
+            "description": "List all products belonging to the authenticated merchant.\nReturns products with images, sorted by created_at descending.\nRequires merchant role."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Product",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.id) {",
+                  "    pm.collectionVariables.set('product_id', jsonData.id.toString());",
+                  "    console.log('Product created: #' + jsonData.id + ' - ' + jsonData.name);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "name",
+                  "value": "Samsung Galaxy A15",
+                  "type": "text"
+                },
+                {
+                  "key": "category",
+                  "value": "Electronics",
+                  "type": "text"
+                },
+                {
+                  "key": "price",
+                  "value": "850000",
+                  "type": "text"
+                },
+                {
+                  "key": "brand",
+                  "value": "Samsung",
+                  "type": "text"
+                },
+                {
+                  "key": "stock_qty",
+                  "value": "10",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/products",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products"
+              ]
+            },
+            "description": "Create a new product listing.\nRequires merchant role.\nProduct is created with `pending_moderation` status.\n\nRequired: name, category, price\nOptional: brand, stock_qty (default 0)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Product Detail",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Get full product detail including merchant info and images.\nPublic endpoint \u00e2\u20ac\u201d no auth required."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Product",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}?name=Samsung+Galaxy+A15+Black&price=800000",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{product_id}}"
+              ],
+              "query": [
+                {
+                  "key": "name",
+                  "value": "Samsung Galaxy A15 Black",
+                  "description": "New product name (optional)"
+                },
+                {
+                  "key": "price",
+                  "value": "800000",
+                  "description": "New price in UGX (optional)"
+                }
+              ]
+            },
+            "description": "Update a product. Only the owner merchant can update.\nAll body params are optional \u00e2\u20ac\u201d only send fields to change.\n\nParams: name, brand, category, price, stock_qty"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Product",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Delete a product and its images.\nAlso removes from Qdrant vector index.\nOnly the owner merchant can delete."
+          },
+          "response": []
+        },
+        {
+          "name": "Upload Product Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.id) {",
+                  "    pm.collectionVariables.set('image_id', jsonData.id.toString());",
+                  "    console.log('Image uploaded: #' + jsonData.id + ' | Primary: ' + jsonData.is_primary);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}/images",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{product_id}}",
+                "images"
+              ]
+            },
+            "description": "Upload an image for a product.\nMax file size: 10MB.\nFirst image uploaded is automatically set as primary.\n\nSelect an image file in the File tab."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Product Image",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products/{{product_id}}/images/{{image_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "{{product_id}}",
+                "images",
+                "{{image_id}}"
+              ]
+            },
+            "description": "Delete a specific product image.\nRemoves from object storage and database."
+          },
+          "response": []
+        },
+        {
+          "name": "Latest Products (Public)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('Total: ' + jsonData.total + ' | Page: ' + jsonData.page);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/products/public/latest?page=1&limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "public",
+                "latest"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number (default: 1)"
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Items per page (default: 20, max: 100)"
+                }
+              ]
+            },
+            "description": "Get latest active products.\nPublic endpoint \u00e2\u20ac\u201d no auth required.\nReturns paginated results with items, page, limit, total."
+          },
+          "response": []
+        },
+        {
+          "name": "Products by Category (Public)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/products/public/category/Electronics?page=1&limit=20",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "products",
+                "public",
+                "category",
+                "Electronics"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Get active products filtered by category.\nPublic endpoint \u00e2\u20ac\u201d no auth required."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Search",
+      "description": "AI-powered visual search endpoints.\nAll search endpoints require client authentication.\nSearch history is automatically recorded in Redis.",
+      "item": [
+        {
+          "name": "Search by Image",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": ""
+                },
+                {
+                  "key": "lat",
+                  "value": "0.3476",
+                  "type": "text",
+                  "description": "Buyer latitude (optional)"
+                },
+                {
+                  "key": "lng",
+                  "value": "32.5825",
+                  "type": "text",
+                  "description": "Buyer longitude (optional)"
+                },
+                {
+                  "key": "price_min",
+                  "value": "",
+                  "type": "text",
+                  "description": "Min price in UGX (optional)"
+                },
+                {
+                  "key": "price_max",
+                  "value": "500000",
+                  "type": "text",
+                  "description": "Max price in UGX (optional)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/search/image",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "search",
+                "image"
+              ]
+            },
+            "description": "Search for similar products by uploading an image.\n\nPipeline: YOLO detection \u00e2\u2020\u2019 SigLIP+DINOv2 embedding \u00e2\u2020\u2019 Qdrant ANN \u00e2\u2020\u2019 reranker\n\nOptional filters: lat/lng for proximity, price_min/price_max for budget.\nMax file size: 10MB."
+          },
+          "response": []
+        },
+        {
+          "name": "Search by Text",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('Found ' + jsonData.total + ' results');",
+                  "jsonData.results.forEach(function(r) {",
+                  "    console.log('  - ' + r.name + ' | ' + r.price + ' ' + r.currency + ' | Score: ' + r.score);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/search/text?query=blue+dress&lat=0.3476&lng=32.5825&price_max=200000",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "search",
+                "text"
+              ],
+              "query": [
+                {
+                  "key": "query",
+                  "value": "blue dress",
+                  "description": "Search query text (required)"
+                },
+                {
+                  "key": "lat",
+                  "value": "0.3476",
+                  "description": "Buyer latitude (optional)"
+                },
+                {
+                  "key": "lng",
+                  "value": "32.5825",
+                  "description": "Buyer longitude (optional)"
+                },
+                {
+                  "key": "price_min",
+                  "value": "",
+                  "description": "Min price (optional)"
+                },
+                {
+                  "key": "price_max",
+                  "value": "200000",
+                  "description": "Max price (optional)"
+                }
+              ]
+            },
+            "description": "Search for products using a text description.\n\nPipeline: text embedding \u00e2\u2020\u2019 Qdrant ANN \u00e2\u2020\u2019 reranker\n\nQuery is required. Location and price filters are optional."
+          },
+          "response": []
+        },
+        {
+          "name": "Search Nearby",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('Found ' + jsonData.total + ' nearby results');",
+                  "jsonData.results.forEach(function(r) {",
+                  "    console.log('  - ' + r.name + ' | ' + r.distance_km + 'km away | ' + r.merchant_name);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/search/nearby?lat=0.3476&lng=32.5825&km=10",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "search",
+                "nearby"
+              ],
+              "query": [
+                {
+                  "key": "lat",
+                  "value": "0.3476",
+                  "description": "Latitude (required)"
+                },
+                {
+                  "key": "lng",
+                  "value": "32.5825",
+                  "description": "Longitude (required)"
+                },
+                {
+                  "key": "km",
+                  "value": "10",
+                  "description": "Search radius in km (default: 10)"
+                }
+              ]
+            },
+            "description": "Find products near a geographic location.\nUses PostGIS spatial queries.\n\nlat and lng are required. km defaults to 10."
+          },
+          "response": []
+        },
+        {
+          "name": "Batch Search",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select multiple image files"
+                },
+                {
+                  "key": "query",
+                  "value": "",
+                  "type": "text",
+                  "description": "Optional text query"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/search/batch",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "search",
+                "batch"
+              ]
+            },
+            "description": "Upload multiple images + optional text query.\nReturns structured sections with results per image/text."
+          },
+          "response": []
+        },
+        {
+          "name": "Search by Description",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "description",
+                  "value": "I need red Nike sneakers under 150k UGX",
+                  "type": "text",
+                  "description": "Natural language description of what you want (required)"
+                },
+                {
+                  "key": "lat",
+                  "value": "0.3476",
+                  "type": "text",
+                  "description": "Buyer latitude (optional)"
+                },
+                {
+                  "key": "lng",
+                  "value": "32.5825",
+                  "type": "text",
+                  "description": "Buyer longitude (optional)"
+                },
+                {
+                  "key": "price_min",
+                  "value": "",
+                  "type": "text",
+                  "description": "Min price in UGX (optional)"
+                },
+                {
+                  "key": "price_max",
+                  "value": "150000",
+                  "type": "text",
+                  "description": "Max price in UGX (optional)"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/search/describe",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "search",
+                "describe"
+              ]
+            },
+            "description": "Search for products by describing what you want in natural language.\n\nPipeline: NLU intent extraction -> entity parsing -> text embedding -> Qdrant ANN -> reranker\n\nExample descriptions:\n- \"I need red Nike sneakers under 150k\"\n- \"Looking for a blue dress size medium\"\n- \"Show me affordable electronics under 200k\"\n\nReturns matching products with images, prices, and seller info."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Client Profile",
+      "description": "Client (buyer) profile management and interest tracking.\nAll endpoints require client authentication.",
+      "item": [
+        {
+          "name": "Get My Profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/profile",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "profile"
+              ]
+            },
+            "description": "Get the authenticated client's profile."
+          },
+          "response": []
+        },
+        {
+          "name": "Update My Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/profile?name=Jane+Updated",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "profile"
+              ],
+              "query": [
+                {
+                  "key": "name",
+                  "value": "Jane Updated",
+                  "description": "New display name (optional)"
+                }
+              ]
+            },
+            "description": "Update the authenticated client's profile.\nCurrently supports updating name."
+          },
+          "response": []
+        },
+        {
+          "name": "List My Interests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/interests",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "interests"
+              ]
+            },
+            "description": "List all products the client has expressed interest in.\nIncludes product details, merchant name, and images.\nSorted by created_at descending."
+          },
+          "response": []
+        },
+        {
+          "name": "Express Interest in Product",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.id) {",
+                  "    console.log('Interest #' + jsonData.id + ' for product ' + jsonData.product_id + ' - Status: ' + jsonData.status);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/interests/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "interests",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Express interest in a product.\nNotifies the merchant (within 24h WhatsApp notification window).\n\nReturns 409 if interest already expressed.\nReturns 404 if product not found."
+          },
+          "response": []
+        },
+        {
+          "name": "Remove Interest",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/interests/{{product_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "interests",
+                "{{product_id}}"
+              ]
+            },
+            "description": "Remove a previously expressed interest.\nReturns 404 if interest not found."
+          },
+          "response": []
+        },
+        {
+          "name": "Search History",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/clients/me/history",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "clients",
+                "me",
+                "history"
+              ]
+            },
+            "description": "Get the client's recent search history.\nReturns last 20 searches stored in Redis (24h TTL).\n\nEach entry contains: query, timestamp."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Merchant Dashboard",
+      "description": "Merchant dashboard, subscription, and interest management.\nAll endpoints require merchant authentication.",
+      "item": [
+        {
+          "name": "Dashboard Stats",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('Products: ' + jsonData.active_products + '/' + jsonData.total_products + ' active');",
+                  "console.log('Interests: ' + jsonData.total_interests + ' total, ' + jsonData.interests_this_week + ' this week');",
+                  "console.log('Plan: ' + jsonData.plan_name);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/dashboard",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "dashboard"
+              ]
+            },
+            "description": "Get merchant dashboard statistics.\n\nReturns:\n- total_products, active_products\n- total_interests, interests_this_week\n- plan_name (current subscription plan)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Subscription",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.active) {",
+                  "    console.log('Plan: ' + jsonData.plan.name + ' (' + jsonData.plan.slug + ')');",
+                  "    console.log('Price: ' + jsonData.plan.price + ' ' + jsonData.plan.currency);",
+                  "    console.log('Max products: ' + jsonData.plan.max_products);",
+                  "    console.log('Started: ' + jsonData.started_at);",
+                  "    console.log('Expires: ' + (jsonData.expires_at || 'Never'));",
+                  "} else {",
+                  "    console.log('No active subscription');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/subscription",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "subscription"
+              ]
+            },
+            "description": "Get the merchant's current subscription plan.\n\nReturns plan details or null if no active subscription.\nPlans: starter (free), growth, pro, enterprise."
+          },
+          "response": []
+        },
+        {
+          "name": "Change Subscription",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('New subscription: ' + jsonData.plan.name + ' | Status: ' + jsonData.status);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/subscription?plan_id=2",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "subscription"
+              ],
+              "query": [
+                {
+                  "key": "plan_id",
+                  "value": "2",
+                  "description": "Plan ID: 1=Starter(Free), 2=Growth(50K), 3=Pro(150K), 4=Enterprise(500K)"
+                }
+              ]
+            },
+            "description": "Change merchant subscription plan.\n\nCancels existing active subscription and activates new one.\n\nPlan IDs:\n1 = Starter (Free, 5 products)\n2 = Growth (50,000 UGX, 50 products)\n3 = Pro (150,000 UGX, 500 products)\n4 = Enterprise (500,000 UGX, unlimited)"
+          },
+          "response": []
+        },
+        {
+          "name": "List Merchant Interests",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "console.log('Total interests: ' + jsonData.length);",
+                  "jsonData.forEach(function(ie) {",
+                  "    console.log('  - Buyer: ' + ie.buyer_phone + ' | Product #' + ie.product_id + ' | ' + ie.status);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/interests",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "interests"
+              ]
+            },
+            "description": "List all buyer interests for the merchant's products.\nSorted by created_at descending.\n\nEach entry: id, buyer_phone, product_id, status, created_at."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Merchant Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/profile?business_name=Conrad+Electronics&category=Electronics&location_lat=0.3476&location_lng=32.5825",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "profile"
+              ],
+              "query": [
+                {
+                  "key": "business_name",
+                  "value": "Conrad Electronics",
+                  "description": "New business name (optional)"
+                },
+                {
+                  "key": "category",
+                  "value": "Electronics",
+                  "description": "Business category (optional)"
+                },
+                {
+                  "key": "location_lat",
+                  "value": "0.3476",
+                  "description": "Latitude (optional)"
+                },
+                {
+                  "key": "location_lng",
+                  "value": "32.5825",
+                  "description": "Longitude (optional)"
+                }
+              ]
+            },
+            "description": "Update merchant profile information.\nAll params are optional \u00e2\u20ac\u201d only send fields to change.\n\nParams: business_name, category, location_lat, location_lng"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "NLU",
+      "description": "Natural Language Understanding \u00e2\u20ac\u201d intent extraction from text.\nAll endpoints require client authentication.",
+      "item": [
+        {
+          "name": "Extract Intents",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "text",
+                  "value": "looking for red shoes",
+                  "type": "text"
+                },
+                {
+                  "key": "has_image",
+                  "value": "false",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/nlu/extract",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "nlu",
+                "extract"
+              ]
+            },
+            "description": "Extract intents from user text.\nReturns structured intents with types, descriptions, and entities."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Result Codes",
+      "description": "Look up customer search result codes.\n\nWhen a customer searches via Chat, they get a result_code (e.g. RS-A3K2).\nThey share this with a merchant, who looks it up to see what the customer wants.\n\nNo customer identity is revealed - just their search context.",
+      "item": [
+        {
+          "name": "Lookup Result Code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.code) {",
+                  "    console.log('Code: ' + jsonData.code);",
+                  "    console.log('Query: ' + (jsonData.search_query || 'Image search'));",
+                  "    console.log('Category: ' + (jsonData.category || 'N/A'));",
+                  "    console.log('Products found: ' + jsonData.product_count);",
+                  "    if (jsonData.sample_products && jsonData.sample_products.length > 0) {",
+                  "        jsonData.sample_products.forEach(function(p) {",
+                  "            console.log('  - ' + p.name + ' (' + p.price + ' UGX)');",
+                  "        });",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/result-codes/{{result_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "result-codes",
+                "{{result_code}}"
+              ]
+            },
+            "description": "Look up a customer's search result code.\n\nRequires merchant auth.\nReturns what the customer was searching for - no user identity.\n\nResponse includes:\n- code: The result code\n- search_query: What they typed\n- image_description: What was detected in their image\n- category, price range\n- product_count: How many matches\n- sample_products: Up to 3 example product names/prices\n- created_at: When the search happened"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Workflow Collections",
+      "description": "Pre-built request sequences for common workflows.\nRun these in order to test full user journeys.",
+      "item": [
+        {
+          "name": "Full Client Signup Flow",
+          "description": "1. Request OTP \u00e2\u2020\u2019 2. Verify OTP (client) \u00e2\u2020\u2019 3. Get profile \u00e2\u2020\u2019 4. Search text \u00e2\u2020\u2019 5. Express interest \u00e2\u2020\u2019 6. List interests",
+          "item": [
+            {
+              "name": "Step 1: Request OTP",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"{{client_phone}}\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/auth/request-otp",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "request-otp"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 2: Verify OTP (Client)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.access_token) {",
+                      "    pm.collectionVariables.set('access_token', jsonData.access_token);",
+                      "    pm.collectionVariables.set('refresh_token', jsonData.refresh_token);",
+                      "    console.log('Client authenticated: ' + jsonData.user.name);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"{{client_phone}}\",\n  \"code\": \"000000\",\n  \"role\": \"client\",\n  \"name\": \"Test Buyer\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/auth/verify-otp",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "verify-otp"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 3: Get Profile",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/clients/me/profile",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "clients",
+                    "me",
+                    "profile"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 4: Search Text",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/search/text?query=phone&lat=0.3476&lng=32.5825",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "search",
+                    "text"
+                  ],
+                  "query": [
+                    {
+                      "key": "query",
+                      "value": "phone"
+                    },
+                    {
+                      "key": "lat",
+                      "value": "0.3476"
+                    },
+                    {
+                      "key": "lng",
+                      "value": "32.5825"
+                    }
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 5: Express Interest",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/clients/me/interests/{{product_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "clients",
+                    "me",
+                    "interests",
+                    "{{product_id}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 6: List Interests",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/clients/me/interests",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "clients",
+                    "me",
+                    "interests"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Full Merchant Signup Flow",
+          "description": "1. Request OTP \u00e2\u2020\u2019 2. Verify OTP (merchant) \u00e2\u2020\u2019 3. Dashboard \u00e2\u2020\u2019 4. Create product \u00e2\u2020\u2019 5. Upload image \u00e2\u2020\u2019 6. List products \u00e2\u2020\u2019 7. Subscription",
+          "item": [
+            {
+              "name": "Step 1: Request OTP",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"{{merchant_phone}}\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/auth/request-otp",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "request-otp"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 2: Verify OTP (Merchant)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.access_token) {",
+                      "    pm.collectionVariables.set('access_token', jsonData.access_token);",
+                      "    pm.collectionVariables.set('refresh_token', jsonData.refresh_token);",
+                      "    console.log('Merchant authenticated: ' + jsonData.user.name);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"{{merchant_phone}}\",\n  \"code\": \"000000\",\n  \"role\": \"merchant\",\n  \"name\": \"Test Shop\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/auth/verify-otp",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "verify-otp"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 3: Dashboard (empty)",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/merchants/me/dashboard",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "merchants",
+                    "me",
+                    "dashboard"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 4: Create Product",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.id) {",
+                      "    pm.collectionVariables.set('product_id', jsonData.id.toString());",
+                      "    console.log('Created product #' + jsonData.id);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "name",
+                      "value": "iPhone 15 Pro",
+                      "type": "text"
+                    },
+                    {
+                      "key": "category",
+                      "value": "Electronics",
+                      "type": "text"
+                    },
+                    {
+                      "key": "price",
+                      "value": "4500000",
+                      "type": "text"
+                    },
+                    {
+                      "key": "brand",
+                      "value": "Apple",
+                      "type": "text"
+                    },
+                    {
+                      "key": "stock_qty",
+                      "value": "5",
+                      "type": "text"
+                    }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/products",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "products"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 5: Upload Image",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": ""
+                    }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/products/{{product_id}}/images",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "products",
+                    "{{product_id}}",
+                    "images"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Step 6: List Products",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/products",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "products"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+          "name": "Step 7: Check Subscription",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/merchants/me/subscription",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "merchants",
+                "me",
+                "subscription"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Step 8: Lookup Result Code",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.code) {",
+                  "    console.log('Customer is looking for: ' + (jsonData.search_query || jsonData.image_description));",
+                  "    console.log('Category: ' + jsonData.category);",
+                  "    console.log('Matches: ' + jsonData.product_count);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/result-codes/{{result_code}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "result-codes",
+                "{{result_code}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+        {
+          "name": "Image Search Flow",
+          "description": "1. Auth \u00e2\u2020\u2019 2. Search by image \u00e2\u2020\u2019 3. Get product detail \u00e2\u2020\u2019 4. Express interest",
+          "item": [
+            {
+              "name": "Auth",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.access_token) {",
+                      "    pm.collectionVariables.set('access_token', jsonData.access_token);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"{{client_phone}}\",\n  \"code\": \"000000\",\n  \"role\": \"client\",\n  \"name\": \"Image Searcher\"\n}"
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/auth/verify-otp",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "auth",
+                    "verify-otp"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Search by Image",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.results && jsonData.results.length > 0) {",
+                      "    pm.collectionVariables.set('product_id', jsonData.results[0].product_id.toString());",
+                      "    console.log('Top match: ' + jsonData.results[0].name + ' (score: ' + jsonData.results[0].score + ')');",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "body": {
+                  "mode": "formdata",
+                  "formdata": [
+                    {
+                      "key": "file",
+                      "type": "file",
+                      "src": ""
+                    }
+                  ]
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/search/image",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "search",
+                    "image"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "View Top Result",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/products/{{product_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "products",
+                    "{{product_id}}"
+                  ]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "Express Interest",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/clients/me/interests/{{product_id}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "clients",
+                    "me",
+                    "interests",
+                    "{{product_id}}"
+                  ]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,400 @@
+import asyncio
+import re
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from src.services.llm_nlu import LLMNLUService, SearchIntent
+from src.services.whatsapp import send_text, download_media
+from src.workers.search_pipeline import SearchPipeline
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NLUResult:
+    intent: str = "unknown"
+    entities: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    is_multi_intent: bool = False
+    search_intents: list[SearchIntent] = field(default_factory=list)
+
+
+_SEARCH_KEYWORDS = re.compile(
+    r"\b(looking for|search|find|do you have|where can i get|need|want|sell me|any .+ available)\b",
+    re.IGNORECASE,
+)
+
+_INTEREST_KEYWORDS = re.compile(
+    r"\b(interested|want to buy|how much|price|cost|what is the price|tell me the price|buy)\b",
+    re.IGNORECASE,
+)
+
+_HELP_KEYWORDS = re.compile(
+    r"\b(help|how to|what can i do|how do i|instructions|guide)\b",
+    re.IGNORECASE,
+)
+
+_GREETING_KEYWORDS = re.compile(
+    r"\b(hello|hi|hey|morning|afternoon|evening|good day|yo|sup|how are you)\b",
+    re.IGNORECASE,
+)
+
+_PRICE_REGEX = re.compile(
+    r"(\d[\d,\.]*)\s*(ugx|shs|shillings?|ug\s*shs?)?",
+    re.IGNORECASE,
+)
+
+_COLOR_KEYWORDS = {
+    "red", "blue", "green", "black", "white", "yellow", "orange", "pink",
+    "purple", "brown", "grey", "gray", "silver", "gold", "navy", "teal",
+    "beige", "maroon", "olive", "cyan", "magenta", "ivory", "tan", "coral",
+    "salmon", "lavender", "indigo", "turquoise", "crimson", "charcoal",
+}
+
+_CATEGORY_KEYWORDS = {
+    "electronics": ["phone", "laptop", "tablet", "headphone", "speaker", "charger", "cable", "camera", "tv", "monitor", "keyboard", "mouse", "earbuds", "powerbank"],
+    "clothing": ["shirt", "dress", "pants", "jeans", "skirt", "jacket", "coat", "sweater", "hoodie", "tshirt", "t-shirt", "shorts", "suit", "blouse", "trousers", "sari", "kanzu"],
+    "shoes": ["shoes", "sneakers", "boots", "sandals", "slippers", "heels", "loafers", "flats", " trainers"],
+    "furniture": ["chair", "table", "sofa", "bed", "desk", "wardrobe", "shelf", "cabinet", "stool", "dresser"],
+    "beauty": ["makeup", "lipstick", "cream", "lotion", "perfume", "shampoo", "soap", "skincare", "cosmetics"],
+    "food": ["rice", "beans", "maize", "coffee", "tea", "sugar", "salt", "flour", "spices", "snack"],
+    "accessories": ["watch", "ring", "necklace", "bracelet", "earrings", "bag", "wallet", "belt", "hat", "scarf", "sunglasses"],
+    "groceries": ["grocery", "vegetable", "fruit", "meat", "fish", "chicken", "bread", "milk", "egg"],
+}
+
+# Families for cross-checking what an image shows vs. what the caption asks for.
+FAMILY_ALIASES = {
+    "vehicles": ["car", "truck", "suv", "van", "vehicle", "sedan", "motorbike", "bicycle", "jeep", "bus", "pickup",
+                 "bmw", "toyota", "mercedes", "audi", "honda", "ford", "nissan", "volkswagen", "hyundai", "lexus",
+                 "porsche", "subaru", "mazda", "kia", "chevrolet", "dodge", "ferrari", "lamborghini", "volvo", "bentley"],
+    "electronics": ["iphone", "samsung", "nokia", "huawei", "tecno", "infinix", "itel", "oppo", "vivo", "xiaomi",
+                    "redmi", "ipad", "kindle", "airpods"],
+    "shoes": ["nike", "adidas", "puma", "reebok", "new balance", "converse", "vans", "sketchers", "crocs",
+              "timberland", "asics", "fila", "heel", "loafer"],
+    "clothing": ["kanzu", "gomesi", "shirt", "trouser", "jean", "dress", "skirt"],
+    "accessories": ["watch", "sunglasses", "necklace", "bracelet", "ring", "belt", "bag"],
+}
+
+
+def detect_product_category(text: str) -> tuple[str | None, str | None]:
+    """Return (matched_topic_keyword, category_family) for the strongest product mention in text.
+
+    E.g. "I want shoes" -> ("shoes", "shoes"); "I need a phone" -> ("phone", "electronics");
+    "I want a BMW" -> ("bmw", "vehicles"); "hello there" -> (None, None).
+    """
+    if not text:
+        return (None, None)
+    text_lower = text.lower()
+    best = None
+    for family, keywords in _CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if re.search(rf"\b{re.escape(kw.strip())}\b", text_lower):
+                if best is None or len(kw) > len(best[0]):
+                    best = (kw.strip(), family)
+    for family, keywords in FAMILY_ALIASES.items():
+        for kw in keywords:
+            if re.search(rf"\b{re.escape(kw)}\b", text_lower):
+                if best is None or len(kw) > len(best[0]):
+                    best = (kw, family)
+    return (best[0], best[1]) if best else (None, None)
+
+
+class RegexNLURouter:
+    """Fallback regex-based NLU when Ollama is unavailable."""
+
+    def _classify_intent(self, text: str, has_image: bool) -> list[SearchIntent]:
+        intents: list[SearchIntent] = []
+        found_greeting = bool(_GREETING_KEYWORDS.search(text)) if text else False
+        found_help = bool(_HELP_KEYWORDS.search(text)) if text else False
+        found_search = bool(_SEARCH_KEYWORDS.search(text)) if text else False
+        found_interest = bool(_INTEREST_KEYWORDS.search(text)) if text else False
+
+        if found_help:
+            intents.append(SearchIntent(type="help", description="User needs help"))
+            return intents
+
+        if found_greeting and not found_search:
+            intents.append(SearchIntent(type="greeting", description="User greeted"))
+            return intents
+
+        if has_image:
+            intents.append(SearchIntent(
+                type="visual_search",
+                description="User uploaded an image to search",
+                entities=self._extract_entities(text or ""),
+            ))
+
+        if text and (found_search or found_interest):
+            intents.append(SearchIntent(
+                type="product_search",
+                entities=self._extract_entities(text),
+            ))
+
+        if not intents:
+            if has_image:
+                intents.append(SearchIntent(type="visual_search"))
+            elif text:
+                intents.append(SearchIntent(
+                    type="product_search",
+                    entities=self._extract_entities(text),
+                ))
+            else:
+                intents.append(SearchIntent(type="unknown"))
+
+        return intents
+
+    def _extract_entities(self, text: str) -> dict[str, Any]:
+        entities: dict[str, Any] = {}
+        if not text:
+            return entities
+
+        words = text.split()
+        prices = []
+        for match in _PRICE_REGEX.finditer(text):
+            raw = match.group(1).replace(",", "").replace(".", "")
+            try:
+                prices.append(float(raw))
+            except ValueError:
+                pass
+        if prices:
+            if len(prices) == 1:
+                entities["price_max"] = prices[0]
+                entities["price_min"] = prices[0]
+            else:
+                entities["price_min"] = min(prices)
+                entities["price_max"] = max(prices)
+
+        text_lower = text.lower()
+        found_colors = [c for c in _COLOR_KEYWORDS if re.search(rf"\b{re.escape(c)}\b", text_lower)]
+        if found_colors:
+            entities["color"] = found_colors[0] if len(found_colors) == 1 else found_colors
+
+        found_categories = []
+        for category, keywords in _CATEGORY_KEYWORDS.items():
+            for kw in keywords:
+                if re.search(rf"\b{re.escape(kw)}\b", text_lower):
+                    found_categories.append(category)
+                    break
+        if found_categories:
+            entities["category"] = found_categories[0] if len(found_categories) == 1 else found_categories
+
+        stop_words = {
+            "i", "am", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would",
+            "could", "should", "may", "might", "shall", "can", "need",
+            "a", "an", "the", "and", "or", "but", "in", "on", "at", "to",
+            "for", "of", "with", "by", "from", "it", "its", "this", "that",
+            "looking", "find", "search", "want", "sell", "buy", "get",
+            "how", "much", "what", "where", "do", "you", "have", "any",
+            "please", "tell", "me", "about", "show", "give", "some",
+            "very", "really", "nice", "good", "great", "best",
+        }
+        name_words = []
+        for w in words:
+            clean = re.sub(r"[^\w]", "", w).lower()
+            if (
+                clean
+                and clean not in stop_words
+                and not clean.isdigit()
+                and clean not in _COLOR_KEYWORDS
+                and clean not in {c for kws in _CATEGORY_KEYWORDS.values() for c in kws}
+            ):
+                name_words.append(w)
+        if name_words:
+            entities["product_name"] = " ".join(name_words)
+
+        loc_match = re.search(r"\b(?:in|at|near|around)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", text)
+        if loc_match:
+            entities["location"] = loc_match.group(1)
+
+        return entities
+
+    async def extract(self, message_text: str, has_image: bool = False) -> NLUResult:
+        intents = self._classify_intent(message_text, has_image)
+        primary = intents[0] if intents else SearchIntent(type="unknown")
+        is_multi = len(intents) > 1
+        return NLUResult(
+            intent=primary.type,
+            entities=primary.entities,
+            confidence=0.5,
+            is_multi_intent=is_multi,
+            search_intents=intents,
+        )
+
+    def build_product_search_intent(self, text: str) -> SearchIntent | None:
+        """Build a product_search intent from raw text, or None if the text isn't a product request.
+
+        Used to recover a caption's product request that the LLM NLU may have dropped
+        when an image is also present (so the customer's request is never lost).
+        """
+        if not text or not text.strip():
+            return None
+        entities = self._extract_entities(text)
+        has_search = bool(_SEARCH_KEYWORDS.search(text))
+        has_interest = bool(_INTEREST_KEYWORDS.search(text))
+        has_product_words = bool(entities.get("category") or entities.get("product_name"))
+        if has_search or has_interest or has_product_words:
+            return SearchIntent(
+                type="product_search",
+                description=text.strip(),
+                entities=entities,
+            )
+        return None
+
+
+_llm_nlu = LLMNLUService()
+_regex_nlu = RegexNLURouter()
+
+
+async def extract_nlu(message_text: str, has_image: bool = False) -> NLUResult:
+    llm_result = await _llm_nlu.extract(message_text, has_image=has_image)
+
+    if llm_result.intents:
+        primary = llm_result.intents[0]
+        is_multi = len(llm_result.intents) > 1
+        return NLUResult(
+            intent=primary.type,
+            entities=primary.entities,
+            confidence=0.85,
+            is_multi_intent=is_multi,
+            search_intents=llm_result.intents,
+        )
+
+    logger.info("LLM NLU unavailable, falling back to regex NLU")
+    return await _regex_nlu.extract(message_text, has_image=has_image)
+
+
+def _price_range_from_entities(entities: dict) -> tuple[float, float] | None:
+    if "price_min" in entities and "price_max" in entities:
+        return (entities["price_min"], entities["price_max"])
+    if "price_max" in entities:
+        return (0.0, entities["price_max"])
+    return None
+
+
+def _build_search_text(entities: dict, original_text: str) -> str:
+    if "product_name" in entities:
+        name = entities["product_name"]
+        color = entities.get("color", "")
+        category = entities.get("category", "")
+        parts = [name, color, category]
+        return " ".join(p for p in parts if p)
+    return original_text
+
+
+async def execute_intent_searches(
+    intents: list[SearchIntent],
+    image_bytes: bytes | None = None,
+    images_bytes: list[bytes] | None = None,
+    buyer_location: tuple[float, float] | None = None,
+) -> list[tuple[str, list]]:
+    pipeline = SearchPipeline()
+    results: list[tuple[str, list]] = []
+    img_list = images_bytes if images_bytes else ([image_bytes] if image_bytes else [])
+    img_idx = 0
+
+    for intent in intents:
+        if intent.type == "visual_search":
+            current = img_list[img_idx] if img_idx < len(img_list) else None
+            img_idx += 1
+            if current:
+                search_results = await pipeline.search_by_image(
+                    image_bytes=current,
+                    buyer_location=buyer_location,
+                    price_range=_price_range_from_entities(intent.entities),
+                )
+                desc = intent.description or "Products matching your image"
+                results.append((desc, search_results))
+
+        elif intent.type == "product_search":
+            search_text = _build_search_text(intent.entities, intent.description)
+            search_results = await pipeline.search_by_text(
+                text=search_text,
+                buyer_location=buyer_location,
+                price_range=_price_range_from_entities(intent.entities),
+            )
+            desc = intent.description or search_text
+            results.append((desc, search_results))
+
+    return results
+
+
+async def compose_multi_intent_reply(
+    search_results: list[tuple[str, list]],
+) -> str:
+    non_empty = [(desc, results) for desc, results in search_results if results]
+    if not non_empty:
+        return "Sorry, I couldn't find matching products."
+
+    sections: list[str] = []
+    for desc, results in non_empty:
+        reply = await SearchPipeline().format_reply(
+            results, max_results=3, section_title=desc,
+        )
+        if reply:
+            sections.append(reply)
+
+    return "\n\n---\n\n".join(sections) if sections else "Sorry, I couldn't find matching products."
+
+
+async def process_batch(batch_payload: dict) -> str:
+    """Process a batch of images + combined text and return a single reply."""
+    images = batch_payload.get("images", [])
+    combined_text = batch_payload.get("text", "")
+
+    # Download all images in parallel
+    download_tasks = [
+        download_media(img["id"])
+        for img in images
+        if isinstance(img, dict) and img.get("id")
+    ]
+    raw = await asyncio.gather(*download_tasks, return_exceptions=True)
+    image_bytes_list: list[bytes] = [b for b in raw if isinstance(b, bytes) and b]
+
+    # Run NLU on combined text (no image — images are handled separately)
+    nlu_result = await extract_nlu(combined_text, has_image=bool(images))
+
+    # Greeting / help with no images → standalone response
+    has_greeting = any(si.type == "greeting" for si in nlu_result.search_intents)
+    has_help = any(si.type == "help" for si in nlu_result.search_intents)
+
+    if has_help:
+        return (
+            "Here's what I can do:\n\n"
+            "1. Send a photo of a product you want — I'll find similar items\n"
+            "2. Type what you're looking for — e.g. 'Looking for red shoes under 100000'\n"
+            "3. I'll show matching products from nearby sellers\n\n"
+            "You can filter by:\n"
+            "- Color: 'blue shirt'\n"
+            "- Price: 'phone under 500000'\n"
+            "- Category: 'electronics', 'clothing', 'shoes', etc."
+        )
+
+    if has_greeting and not images:
+        return (
+            "Hello! Welcome to whatAppseller.\n\n"
+            "Send a photo or describe what you're looking for, "
+            "and I'll find matching products from local sellers!"
+        )
+
+    # Build intents: one visual_search per image
+    intents: list[SearchIntent] = []
+    for i, img_data in enumerate(images):
+        caption = (img_data.get("caption") or "").strip() if isinstance(img_data, dict) else ""
+        description = caption or f"Image {i + 1}"
+        intents.append(SearchIntent(type="visual_search", description=description))
+
+    # Add text-only intents from NLU (product_search, general_question, chat)
+    for si in nlu_result.search_intents:
+        if si.type in ("product_search", "general_question", "chat", "unknown"):
+            intents.append(si)
+
+    # Filter down to only searchable intents
+    search_intents = [si for si in intents if si.type in ("visual_search", "product_search")]
+
+    if not search_intents:
+        return "Sorry, I couldn't find matching products."
+
+    results = await execute_intent_searches(search_intents, images_bytes=image_bytes_list)
+    return await compose_multi_intent_reply(results)

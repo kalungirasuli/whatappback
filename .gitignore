@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Tests / tooling caches
+.pytest_cache/
+.ruff_cache/
+.qodo/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+.hypothesis/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+!docker/.env.example
+
+# Runtime logs (contain OTPs and other sensitive output)
+api_*.log
+api_out*.log
+api_err*.log
+*.log
+
+# Model weights / downloaded models
+*.pt
+*.onnx
+*.h5
+*.pkl
+models/
+!models/.gitkeep
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local infra state
+docker/pgdata/
+docker/qdrant_data/
+docker/redis_data/
+docker/minio_data/
