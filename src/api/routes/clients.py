@@ -1,4 +1,4 @@
-import json
+﻿import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from src.core.dependencies import get_db, get_redis
 from src.domain.models import User, InterestEvent, Product
-from src.auth.dependencies import require_client
+from src.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
 
@@ -16,7 +16,7 @@ SEARCH_HISTORY_PREFIX = "search_history:"
 
 @router.get("/me/profile")
 async def get_profile(
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
 ):
     return {
         "id": user.id,
@@ -31,7 +31,7 @@ async def get_profile(
 
 @router.put("/me/profile")
 async def update_profile(
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     name: str | None = None,
 ):
@@ -54,7 +54,7 @@ async def update_profile(
 
 @router.get("/me/interests")
 async def list_interests(
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -93,7 +93,7 @@ async def list_interests(
 @router.post("/me/interests/{product_id}")
 async def express_interest(
     product_id: int,
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     product_result = await db.execute(
@@ -133,7 +133,7 @@ async def express_interest(
 @router.delete("/me/interests/{product_id}")
 async def remove_interest(
     product_id: int,
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -155,7 +155,7 @@ async def remove_interest(
 
 @router.get("/me/history")
 async def search_history(
-    user: User = Depends(require_client),
+    user: User = Depends(get_current_user),
     redis=Depends(get_redis),
 ):
     key = f"{SEARCH_HISTORY_PREFIX}{user.phone_number}"

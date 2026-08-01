@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Q
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_db, get_redis
-from src.auth.dependencies import require_client
+from src.auth.dependencies import get_current_user
 from src.workers.nlu_router import (
     extract_nlu,
     execute_intent_searches,
@@ -241,7 +241,7 @@ async def chat(
     files: list[UploadFile] | None = File(None),
     lat: float | None = Query(None),
     lng: float | None = Query(None),
-    user=Depends(require_client),
+    user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
 ):

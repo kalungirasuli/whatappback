@@ -7,8 +7,8 @@ from sqlalchemy.orm import selectinload
 
 from src.core.dependencies import get_db
 from src.domain.models import User, Merchant, Product, InterestEvent, MerchantSubscription, SubscriptionPlan
-from src.domain.enums import ProductStatus, MerchantStatus
-from src.auth.dependencies import require_merchant
+from src.domain.enums import ProductStatus, MerchantStatus, UserRole
+from src.auth.dependencies import require_merchant, get_current_user
 from src.services.postgres_service import create_merchant
 
 router = APIRouter(prefix="/api/merchants", tags=["merchants"])
@@ -181,7 +181,7 @@ async def change_subscription(
 
 @router.get("/me/interests")
 async def list_merchant_interests(
-    user: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -212,9 +212,34 @@ async def list_merchant_interests(
     ]
 
 
+@router.get("/me/profile")
+async def get_merchant_profile(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Merchant).where(Merchant.phone_number == user.phone_number)
+    )
+    db_merchant = result.scalar_one_or_none()
+
+    if not db_merchant:
+        raise HTTPException(status_code=404, detail="Merchant profile not found")
+
+    return {
+        "id": db_merchant.id,
+        "phone_number": db_merchant.phone_number,
+        "business_name": db_merchant.business_name,
+        "category": db_merchant.category,
+        "location_lat": db_merchant.location_lat,
+        "location_lng": db_merchant.location_lng,
+        "status": db_merchant.status.value,
+        "created_at": db_merchant.created_at.isoformat(),
+    }
+
+
 @router.put("/me/profile")
 async def update_merchant_profile(
-    user: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     business_name: str | None = None,
     category: str | None = None,
@@ -237,6 +262,10 @@ async def update_merchant_profile(
             lat=location_lat,
             lng=location_lng,
         )
+        if user.role != UserRole.merchant:
+            user.role = UserRole.merchant
+            await db.commit()
+            await db.refresh(user)
     else:
         if business_name is not None:
             db_merchant.business_name = business_name

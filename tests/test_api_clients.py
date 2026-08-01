@@ -1,11 +1,11 @@
-import datetime
+﻿import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import httpx
 
 from src.api.main import app
-from src.auth.dependencies import require_client
+from src.auth.dependencies import get_current_user
 from src.core.dependencies import get_db, get_redis
 from src.domain.models import User
 from src.domain.enums import UserRole
@@ -54,7 +54,7 @@ async def client():
 class TestGetProfile:
     async def test_get_profile(self, client):
         user = _make_client_user(user_id=7, phone="256700999999")
-        app.dependency_overrides[require_client] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         resp = await client.get("/api/clients/me/profile")
 
@@ -69,7 +69,7 @@ class TestGetProfile:
 class TestUpdateProfile:
     async def test_update_profile(self, client):
         user = _make_client_user()
-        app.dependency_overrides[require_client] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         mock_session = AsyncMock()
         mock_session.refresh = AsyncMock()
@@ -90,7 +90,7 @@ class TestUpdateProfile:
 class TestInterests:
     async def test_list_interests(self, client):
         user = _make_client_user()
-        app.dependency_overrides[require_client] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         mock_interest = MagicMock()
         mock_interest.id = 50
@@ -131,7 +131,7 @@ class TestInterests:
 
     async def test_express_interest(self, client):
         user = _make_client_user()
-        app.dependency_overrides[require_client] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         product = MagicMock()
         product.id = 10
@@ -170,7 +170,7 @@ class TestInterests:
 
     async def test_remove_interest(self, client):
         user = _make_client_user()
-        app.dependency_overrides[require_client] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         interest = MagicMock()
         interest.id = 50

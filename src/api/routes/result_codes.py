@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_db
-from src.auth.dependencies import require_merchant
+from src.auth.dependencies import get_current_user
 from src.services.result_code_service import ResultCodeService
 
 router = APIRouter(prefix="/api/result-codes", tags=["result-codes"])
@@ -12,7 +12,7 @@ _service = ResultCodeService()
 @router.get("/{code}")
 async def lookup_result_code(
     code: str,
-    user=Depends(require_merchant),
+    user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     lookup = await _service.lookup(db, code)

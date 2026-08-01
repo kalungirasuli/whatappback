@@ -5,7 +5,7 @@ import pytest
 import httpx
 
 from src.api.main import app
-from src.auth.dependencies import require_merchant
+from src.auth.dependencies import require_merchant, get_current_user
 from src.core.dependencies import get_db
 from src.domain.models import User
 from src.domain.enums import UserRole
@@ -199,7 +199,7 @@ class TestMerchantProfile:
         user = _make_merchant_user()
         db_merchant = _mock_merchant()
 
-        app.dependency_overrides[require_merchant] = lambda: user
+        app.dependency_overrides[get_current_user] = lambda: user
 
         mock_session = AsyncMock()
         mock_session.execute.return_value = _mock_result(scalar_value=db_merchant)
