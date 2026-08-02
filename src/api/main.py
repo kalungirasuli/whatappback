@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.dependencies import init_redis, close_redis, init_storage
 from src.shared.logging import setup_logging
+from src.shared.reqlog import log_frontend_request
 from src.auth.main import router as auth_router
 from src.api.routes.products import router as products_router
 from src.api.routes.search import router as search_router
@@ -34,6 +35,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_all_frontend_requests(request, call_next):
+    """Trace every request crossing the boundary (method, path, payload metadata,
+    response status and latency) so frontend vs backend data can be compared."""
+    import time
+
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = int((time.perf_counter() - start) * 1000)
+    query = request.url.query
+    log_frontend_request(
+        method=request.method,
+        path=request.url.path,
+        query=f"?{query}" if query else "",
+        client=request.client.host if request.client else "-",
+        content_type=request.headers.get("content-type", "") or "-",
+        content_length=request.headers.get("content-length", "") or "-",
+        status=response.status_code,
+        duration_ms=duration_ms,
+    )
+    return response
 
 app.include_router(auth_router)
 app.include_router(products_router)

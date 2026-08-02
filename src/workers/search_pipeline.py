@@ -1,6 +1,11 @@
 import asyncio
 import logging
 
+from src.services.categories import (
+    SCORE_BAND_RATIO,
+    family_for_category,
+    family_for_detector_labels,
+)
 from src.services.embedding import EmbeddingService
 from src.services.qdrant_service import QdrantService, SearchResult
 from src.services.reranker import Reranker, RerankedResult
@@ -12,6 +17,47 @@ _embedding = EmbeddingService()
 _qdrant = QdrantService()
 _reranker = Reranker()
 _detector = ObjectDetector()
+
+
+def apply_consistency_filter(
+    results: list[RerankedResult],
+    preferred_family: str | None = None,
+) -> list[RerankedResult]:
+    """Drop cross-category pollution and stragglers while never over-filtering.
+
+    - Determines the dominant product family from the detector (preferred) or the
+      top result's category.
+    - Keeps only results in that family (kills phones/shoes leaking into car results).
+    - Applies a score band relative to the top score so weak matches don't surface.
+    - If the family can't be determined, or filtering would empty the list, the
+      original list is preserved.
+    """
+    if not results:
+        return results
+
+    family = preferred_family
+    if family is None:
+        family = family_for_category(results[0].metadata.get("category"))
+
+    filtered = results
+    if family is not None:
+        matched = [
+            r for r in results
+            if family_for_category(r.metadata.get("category")) == family
+        ]
+        if matched:
+            filtered = matched
+
+    top_score = filtered[0].score if filtered else 0.0
+    if top_score > 0:
+        kept = [r for r in filtered if r.score >= top_score * SCORE_BAND_RATIO]
+        if kept:
+            filtered = kept
+
+    for i, r in enumerate(filtered, start=1):
+        r.rank = i
+        r.match_label = _reranker._match_label(i)
+    return filtered
 
 
 class SearchPipeline:
@@ -26,6 +72,7 @@ class SearchPipeline:
 
         crops = await _detector.detect_and_crop(image_bytes)
         primary = crops[0].image_bytes if crops else image_bytes
+        labels = [c.label for c in crops if c.label]
 
         siglip_vector = await _embedding.embed_image(primary)
         dinov2_vector = await _embedding.embed_image_dinov2(primary)
@@ -38,7 +85,8 @@ class SearchPipeline:
             price_range=price_range,
         )
 
-        return reranked
+        preferred_family = family_for_detector_labels(labels)
+        return apply_consistency_filter(reranked, preferred_family=preferred_family)
 
     async def search_by_text(
         self,
@@ -64,7 +112,7 @@ class SearchPipeline:
             price_range=price_range,
         )
 
-        return reranked
+        return apply_consistency_filter(reranked)
 
     async def format_reply(
         self,

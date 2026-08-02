@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     jwt_secret: str = "change-me-in-production-jwt-secret"
     jwt_algorithm: str = "HS256"
-    jwt_access_expire_minutes: int = 15
+    jwt_access_expire_minutes: int = 4320
     jwt_refresh_expire_days: int = 30
     otp_expire_seconds: int = 300
     otp_rate_limit_per_phone: int = 3

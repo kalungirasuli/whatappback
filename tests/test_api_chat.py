@@ -10,8 +10,8 @@ from src.core.dependencies import get_db, get_redis
 from src.domain.models import User
 from src.domain.enums import UserRole
 from src.services.reranker import RerankedResult
-from src.workers.nlu_router import NLUResult
 from src.services.llm_nlu import SearchIntent
+from src.services.lisa_agent import AgentTurn
 
 
 def _make_client_user(user_id=1, phone="256700000000"):
@@ -68,10 +68,9 @@ class TestChat:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu:
-            mock_nlu.return_value = NLUResult(
-                intent="greeting",
-                search_intents=[SearchIntent(type="greeting")],
+        with patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide:
+            mock_decide.return_value = AgentTurn(
+                action="chat", reply="Hello! I'm Lisa 👋 How can I help you today?"
             )
 
             resp = await client.post("/api/chat", data={"text": "hello"})
@@ -91,10 +90,10 @@ class TestChat:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu:
-            mock_nlu.return_value = NLUResult(
-                intent="help",
-                search_intents=[SearchIntent(type="help")],
+        with patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide:
+            mock_decide.return_value = AgentTurn(
+                action="chat",
+                reply="Here's what I can do: tell me what you want or send a photo!",
             )
 
             resp = await client.post("/api/chat", data={"text": "help"})
@@ -121,15 +120,14 @@ class TestChat:
         reranked = [RerankedResult(product_id=1, score=0.92, rank=1, match_label="Exact")]
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat._lisa.present_results", new_callable=AsyncMock) as mock_present,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
             patch("src.api.routes.chat._result_code_service.generate", new_callable=AsyncMock) as mock_gen,
             patch("src.api.routes.chat._result_code_service.store", new_callable=AsyncMock) as mock_store,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="product_search",
-                search_intents=[SearchIntent(type="product_search", description="red shoes")],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="red shoes")
+            mock_present.return_value = ""
             mock_exec.return_value = [("red shoes", reranked)]
             mock_gen.return_value = "RS-TEST"
 
@@ -172,13 +170,10 @@ class TestChat:
         app.dependency_overrides[get_db] = lambda: mock_db
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="product_search",
-                search_intents=[SearchIntent(type="product_search", description="xyz")],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="xyz")
             mock_exec.return_value = [("xyz", [])]
 
             resp = await client.post("/api/chat", data={"text": "xyz"})
@@ -216,17 +211,16 @@ class TestChat:
         reranked = [RerankedResult(product_id=7, score=0.95, rank=1, match_label="Exact")]
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat._lisa.present_results", new_callable=AsyncMock) as mock_present,
             patch("src.api.routes.chat._describe_image", new_callable=AsyncMock) as mock_desc,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
             patch("src.api.routes.chat._result_code_service.generate", new_callable=AsyncMock) as mock_gen,
             patch("src.api.routes.chat._result_code_service.store", new_callable=AsyncMock) as mock_store,
             patch("src.api.routes.chat._regex_nlu.build_product_search_intent") as mock_recover,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="visual_search",
-                search_intents=[SearchIntent(type="visual_search", description="I see a car in your image")],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="I want shoes")
+            mock_present.return_value = ""
             mock_desc.return_value = "I see a car in your image"
             mock_recover.return_value = None
             mock_exec.return_value = [("I see a car in your image", reranked)]
@@ -262,19 +256,15 @@ class TestChat:
         reranked = [RerankedResult(product_id=7, score=0.95, rank=1, match_label="Exact")]
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat._lisa.present_results", new_callable=AsyncMock) as mock_present,
             patch("src.api.routes.chat._describe_image", new_callable=AsyncMock) as mock_desc,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
             patch("src.api.routes.chat._result_code_service.generate", new_callable=AsyncMock) as mock_gen,
             patch("src.api.routes.chat._result_code_service.store", new_callable=AsyncMock) as mock_store,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="product_search",
-                search_intents=[
-                    SearchIntent(type="product_search", description="car"),
-                    SearchIntent(type="visual_search", description="I see a car in your image"),
-                ],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="car")
+            mock_present.return_value = ""
             mock_desc.return_value = "I see a car in your image"
             mock_exec.return_value = [("I see a car in your image", reranked)]
             mock_gen.return_value = "RS-CAR2"
@@ -286,9 +276,9 @@ class TestChat:
         data = resp.json()
         assert "follow_up" not in data
 
-    async def test_chat_recovers_dropped_caption_intent(self, client):
-        """If the NLU drops the caption's product request when an image is present,
-        the regex guard must recover it so no customer request is lost."""
+    async def test_chat_search_builds_caption_and_visual_intents(self, client):
+        """When Lisa decides to search, the caption request AND the photo are both
+        searched so no customer request is ever lost."""
         mock_redis = AsyncMock()
         mock_db = AsyncMock()
         mock_db.execute.return_value = MagicMock(
@@ -296,17 +286,16 @@ class TestChat:
         )
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat._lisa.present_results", new_callable=AsyncMock) as mock_present,
             patch("src.api.routes.chat._describe_image", new_callable=AsyncMock) as mock_desc,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
             patch("src.api.routes.chat._result_code_service.generate", new_callable=AsyncMock) as mock_gen,
             patch("src.api.routes.chat._result_code_service.store", new_callable=AsyncMock) as mock_store,
             patch("src.api.routes.chat._regex_nlu.build_product_search_intent") as mock_recover,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="visual_search",
-                search_intents=[SearchIntent(type="visual_search", description="I see a car in your image")],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="I want shoes")
+            mock_present.return_value = ""
             mock_desc.return_value = "I see a car in your image"
             mock_recover.return_value = SearchIntent(type="product_search", description="shoes")
             mock_exec.return_value = [("I see a car in your image", [])]
@@ -338,16 +327,15 @@ class TestChat:
         reranked = [RerankedResult(product_id=1, score=0.92, rank=1, match_label="Exact")]
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat._lisa.present_results", new_callable=AsyncMock) as mock_present,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
             patch("src.api.routes.chat._result_code_service.generate", new_callable=AsyncMock) as mock_gen,
             patch("src.api.routes.chat._result_code_service.store", new_callable=AsyncMock) as mock_store,
             patch("src.api.routes.chat._chat_log.log", new_callable=AsyncMock) as mock_log,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="product_search",
-                search_intents=[SearchIntent(type="product_search", description="red shoes")],
-            )
+            mock_decide.return_value = AgentTurn(action="search", search_text="red shoes")
+            mock_present.return_value = ""
             mock_exec.return_value = [("red shoes", reranked)]
             mock_gen.return_value = "RS-LOG1"
 
@@ -379,12 +367,11 @@ class TestChat:
         app.dependency_overrides[get_db] = lambda: mock_db
 
         with (
-            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
             patch("src.api.routes.chat._chat_log.log", new_callable=AsyncMock) as mock_log,
         ):
-            mock_nlu.return_value = NLUResult(
-                intent="greeting",
-                search_intents=[SearchIntent(type="greeting")],
+            mock_decide.return_value = AgentTurn(
+                action="chat", reply="Hello! I'm Lisa 👋 How can I help you today?"
             )
 
             resp = await client.post("/api/chat", data={"text": "hello"})

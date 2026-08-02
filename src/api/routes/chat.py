@@ -7,48 +7,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.dependencies import get_db, get_redis
 from src.auth.dependencies import get_current_user
 from src.workers.nlu_router import (
-    extract_nlu,
     execute_intent_searches,
     detect_product_category,
     RegexNLURouter,
-    NLUResult,
 )
 from src.services.llm_nlu import SearchIntent
+from src.services.categories import family_for_category
 from src.services.detector import ObjectDetector
+from src.services.lisa_agent import LisaAgent
 from src.services.result_code_service import ResultCodeService
 from src.services.chat_log_service import ChatLogService
 from src.shared.correlation import get_correlation_id
+from src.shared.reqlog import (
+    file_meta,
+    log_chat_input,
+    log_chat_output,
+    log_chat_turn,
+)
 from src.api.routes.search import _load_products, _format_results, _record_search
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 _result_code_service = ResultCodeService()
 _chat_log = ChatLogService()
 _regex_nlu = RegexNLURouter()
-
-_HELP_TEXT = (
-    "Here's what I can do:\n\n"
-    "1. Describe what you want — e.g. 'I need red shoes under 100k'\n"
-    "2. Upload a photo — I'll find similar products\n"
-    "3. I'll show matching products with images and prices\n\n"
-    "You can also:\n"
-    "- Filter by color: 'blue shirt'\n"
-    "- Filter by price: 'phone under 500000'\n"
-    "- Filter by category: 'electronics', 'clothing', 'shoes'"
-)
+_lisa = LisaAgent()
 
 _GREETING_TEXT = (
-    "Hello! Welcome to whatAppseller.\n\n"
+    "Hello! I'm Lisa 👋 Welcome to whatAppSeller.\n\n"
     "Tell me what you're looking for, or upload a photo, "
     "and I'll find matching products from local sellers!"
-)
-
-_GENERAL_ANSWER = (
-    "I'm here to help you find products from local sellers!\n\n"
-    "You can:\n"
-    "- Tell me what you need — e.g. 'I want a phone under 500k'\n"
-    "- Upload a photo — I'll find similar items\n"
-    "- Ask me to find something nearby\n\n"
-    "All our merchants accept Mobile Money (MTN, Airtel) and cash on delivery."
 )
 
 _RECALL_CODE_RE = re.compile(r"^\s*RS-[A-Z0-9]+\s*$", re.IGNORECASE)
@@ -57,24 +44,6 @@ _RECALL_TEXT_RE = re.compile(
     r"|\b(search|result|code)\b.*\b(last|previous|before|earlier|old|saved)\b",
     re.IGNORECASE,
 )
-
-# Product/catalog category -> broad family used to cross-check image vs. caption.
-_PRODUCT_FAMILY = {
-    "cars": "vehicles",
-    "automotive": "vehicles",
-    "vehicles": "vehicles",
-    "phone": "electronics",
-    "phones": "electronics",
-    "electronics": "electronics",
-    "shoes": "shoes",
-    "footwear": "shoes",
-    "clothing": "clothing",
-    "furniture": "furniture",
-    "beauty": "beauty",
-    "food": "food",
-    "accessories": "accessories",
-    "groceries": "groceries",
-}
 
 _detector = ObjectDetector()
 
@@ -232,7 +201,24 @@ async def _log_and_return(
     except Exception:
         import logging
         logging.getLogger(__name__).exception("Failed to log chat interaction")
+    try:
+        log_chat_output(reply)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Failed to log chat output")
     return reply
+
+
+def _build_top_summary(sections: list[dict]) -> list[dict]:
+    summary: list[dict] = []
+    for section in sections:
+        for item in section.get("results", [])[:3]:
+            summary.append({
+                "name": item.get("name"),
+                "price": item.get("price"),
+                "merchant_name": (item.get("merchant") or {}).get("business_name", "a local seller"),
+            })
+    return summary
 
 
 @router.post("")
@@ -257,6 +243,19 @@ async def chat(
     has_text = bool(text.strip())
     has_images = bool(image_bytes_list)
     buyer_location = (lat, lng) if lat is not None and lng is not None else None
+
+    log_chat_input(
+        user=user,
+        message_type=(
+            "both" if has_text and has_images
+            else "image" if has_images
+            else "text" if has_text
+            else "empty"
+        ),
+        text=text if has_text else None,
+        files=[file_meta(f.filename or f"file{i}", image_bytes_list[i]) for i, f in enumerate(files or [])],
+        location=buyer_location,
+    )
 
     if has_text and has_images:
         user_message_type = "both"
@@ -290,69 +289,48 @@ async def chat(
             db, user, meta, await _handle_recall(text.strip(), db, user), start
         )
 
-    # Run NLU on text
-    nlu_result = await extract_nlu(text, has_image=has_images) if has_text else NLUResult()
-    search_intents_from_nlu = nlu_result.search_intents or []
-    meta["intents"] = list(search_intents_from_nlu)
+    image_desc = None
+    if has_images:
+        image_desc = await _describe_image(image_bytes_list[0])
+        meta["image_description"] = image_desc
 
-    # Handle non-search intents
-    has_recall = bool(_RECALL_TEXT_RE.search(text)) if has_text else False
-    has_greeting = any(si.type == "greeting" for si in search_intents_from_nlu)
-    has_help = any(si.type == "help" for si in search_intents_from_nlu)
-    has_general = any(si.type == "general_question" for si in search_intents_from_nlu)
-    has_text_search = any(si.type == "product_search" for si in search_intents_from_nlu)
+    # Lisa reads the full message + history and decides: chat or search.
+    turn = await _lisa.decide(redis, user.id, text, has_images, image_note=image_desc)
+    log_chat_turn(action=turn.action, search_text=turn.search_text, reply=turn.reply)
 
-    if has_recall and not has_text_search and not has_images:
-        return await _log_and_return(
-            db, user, meta, await _handle_recall_from_text(db, user), start
+    # A photo ALWAYS means search — never reply without searching the image.
+    if turn.action != "search" and not has_images:
+        reply = {"reply_type": "text", "text": turn.reply}
+        await _lisa.record_turn(
+            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), turn.reply
         )
+        return await _log_and_return(db, user, meta, reply, start)
 
-    if has_help:
-        return await _log_and_return(db, user, meta, {"reply_type": "text", "text": _HELP_TEXT}, start)
-
-    if has_general and not has_text_search and not has_images:
-        return await _log_and_return(db, user, meta, {"reply_type": "text", "text": _GENERAL_ANSWER}, start)
-
-    if has_greeting and not has_text_search and not has_images:
-        return await _log_and_return(db, user, meta, {"reply_type": "text", "text": _GREETING_TEXT}, start)
-
-    # Build search intents
+    # ---- search path ----------------------------------------------------
     intents: list[SearchIntent] = []
-    image_descriptions: list[str] = []
-    for i in range(len(image_bytes_list)):
-        img_desc = await _describe_image(image_bytes_list[i])
-        image_descriptions.append(img_desc)
-        intents.append(SearchIntent(type="visual_search", description=img_desc))
-    if image_descriptions:
-        meta["image_description"] = ", ".join(image_descriptions)
-
-    for si in search_intents_from_nlu:
-        if si.type in ("product_search", "general_question", "chat", "unknown", "Product Search Intent", "Visual Search Intent", "General Question"):
-            intents.append(si)
-
-    # Customer-relations guard: if an image is present and the NLU dropped the
-    # caption's product request, recover it so the customer's request is never lost.
-    if has_images and has_text and not any(si.type == "product_search" for si in intents):
-        recovered = _regex_nlu.build_product_search_intent(text)
+    for _ in image_bytes_list:
+        intents.append(SearchIntent(
+            type="visual_search",
+            description=image_desc or "Products matching your image",
+        ))
+    if has_text:
+        search_text = (turn.search_text or text).strip()
+        recovered = _regex_nlu.build_product_search_intent(search_text)
         if recovered:
             intents.append(recovered)
-            meta["intents"] = meta["intents"] + [recovered]
+        else:
+            intents.append(SearchIntent(type="product_search", description=search_text))
 
     search_intents = [si for si in intents if si.type in ("visual_search", "product_search")]
+    meta["intents"] = list(search_intents)
 
     if not search_intents:
-        return await _log_and_return(
-            db,
-            user,
-            meta,
-            {
-                "reply_type": "text",
-                "text": "I'm sorry, I didn't quite understand what you're looking for. Could you describe it differently?",
-            },
-            start,
+        reply = {"reply_type": "text", "text": "What would you like me to look for? Describe it or send a photo."}
+        await _lisa.record_turn(
+            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
         )
+        return await _log_and_return(db, user, meta, reply, start)
 
-    # Execute searches with location
     results = await execute_intent_searches(
         search_intents,
         images_bytes=image_bytes_list,
@@ -360,16 +338,11 @@ async def chat(
     )
 
     if not any(reranked for _, reranked in results):
-        return await _log_and_return(
-            db,
-            user,
-            meta,
-            {
-                "reply_type": "text",
-                "text": "Sorry, I searched but couldn't find matching products right now. Try a different description or check back later!",
-            },
-            start,
+        reply = {"reply_type": "text", "text": "Sorry, I searched but couldn't find matching products right now. Try a different description or check back later!"}
+        await _lisa.record_turn(
+            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
         )
+        return await _log_and_return(db, user, meta, reply, start)
 
     # Build sections with distance info
     sections = []
@@ -405,8 +378,6 @@ async def chat(
     combined_text = f"[chat] {text}" if text else "[chat image]"
     await _record_search(redis, user.phone_number, combined_text)
 
-    response_text = _build_response_text(sections, buyer_location is not None)
-
     # Customer-relations follow-up when caption and image disagree
     text_topic, text_family = detect_product_category(text) if has_text else (None, None)
     meta["text_topic"] = text_topic
@@ -415,10 +386,13 @@ async def chat(
         (s for s in sections if s["label"].lower().startswith("i see")), None
     )
     if visual_section and visual_section["results"]:
-        meta["image_family"] = _PRODUCT_FAMILY.get(
+        meta["image_family"] = family_for_category(
             (visual_section["results"][0].get("category") or "").lower()
         )
     follow_up = _build_follow_up(text_topic, text_family, meta["image_family"])
+
+    # Lisa writes the natural summary of what was found
+    lisa_text = await _lisa.present_results(redis, user.id, _build_top_summary(sections))
 
     # Generate result code
     result_code = await _result_code_service.generate(db)
@@ -435,14 +409,20 @@ async def chat(
         sample_products=ResultCodeService.build_sample_products(all_reranked, all_db_products),
     )
 
+    response_text = _build_response_text(sections, buyer_location is not None)
+    final_text = lisa_text or response_text
+
     reply: dict = {
         "reply_type": "search_results",
         "result_code": result_code,
-        "response_text": f"{response_text}\n\nShare code *{result_code}* with a merchant so they know what you're looking for!",
+        "response_text": f"{final_text}\n\nShare code *{result_code}* with a merchant so they know what you're looking for!",
         "sections": sections,
     }
     if follow_up:
         reply["follow_up"] = follow_up
         reply["response_text"] += f"\n\n{follow_up['prompt']}"
 
+    await _lisa.record_turn(
+        redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["response_text"]
+    )
     return await _log_and_return(db, user, meta, reply, start)

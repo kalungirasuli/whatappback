@@ -6,7 +6,7 @@ from PIL import Image
 
 from src.services.qdrant_service import SearchResult
 from src.services.reranker import RerankedResult
-from src.workers.search_pipeline import SearchPipeline
+from src.workers.search_pipeline import SearchPipeline, apply_consistency_filter
 
 
 def _make_image_bytes() -> bytes:
@@ -22,6 +22,16 @@ def _make_search_result(pid: int, score: float = 0.8) -> SearchResult:
 
 def _make_reranked(pid: int, rank: int = 1) -> RerankedResult:
     return RerankedResult(product_id=pid, score=0.8, rank=rank, match_label="Closest match")
+
+
+def _make_category_result(pid: int, category: str, score: float) -> RerankedResult:
+    return RerankedResult(
+        product_id=pid,
+        score=score,
+        rank=0,
+        match_label="Match",
+        metadata={"product_name": f"Product {pid}", "category": category},
+    )
 
 
 class TestSearchByImage:
@@ -210,3 +220,59 @@ class TestFormatReply:
         reply = await pipeline.format_reply(results)
 
         assert "Product #42" in reply
+
+
+class TestConsistencyFilter:
+    def test_empty_results_passthrough(self):
+        assert apply_consistency_filter([]) == []
+
+    def test_unknown_family_keeps_all(self):
+        results = [_make_reranked(1), _make_reranked(2, rank=2)]
+        filtered = apply_consistency_filter(results)
+        assert [r.product_id for r in filtered] == [1, 2]
+
+    def test_drops_cross_category_pollution(self):
+        """A car-anchored result list must never show phones or shoes."""
+        results = [
+            _make_category_result(1, "Cars", 0.60),
+            _make_category_result(2, "Cars", 0.41),
+            _make_category_result(3, "Cars", 0.34),
+            _make_category_result(4, "Phones", 0.21),
+            _make_category_result(5, "Shoes", 0.16),
+        ]
+        filtered = apply_consistency_filter(results)
+        assert [r.product_id for r in filtered] == [1, 2, 3]
+
+    def test_preferred_family_wins(self):
+        """The detector's family overrides the top result's category."""
+        results = [
+            _make_category_result(1, "Cars", 0.60),
+            _make_category_result(2, "Cars", 0.41),
+            _make_category_result(3, "Phones", 0.39),
+        ]
+        filtered = apply_consistency_filter(results, preferred_family="vehicles")
+        assert [r.product_id for r in filtered] == [1, 2]
+
+    def test_score_band_drops_stragglers(self):
+        results = [
+            _make_category_result(1, "Cars", 0.60),
+            _make_category_result(2, "Cars", 0.20),
+            _make_category_result(3, "Cars", 0.10),
+        ]
+        filtered = apply_consistency_filter(results)
+        assert [r.product_id for r in filtered] == [1]
+
+    def test_filter_never_empties_list(self):
+        """If every result would be dropped, the original list is preserved."""
+        results = [_make_reranked(1)]
+        filtered = apply_consistency_filter(results, preferred_family="vehicles")
+        assert [r.product_id for r in filtered] == [1]
+
+    def test_ranks_are_recomputed(self):
+        results = [
+            _make_category_result(10, "Cars", 0.6),
+            _make_category_result(11, "Phones", 0.4),
+            _make_category_result(12, "Cars", 0.3),
+        ]
+        filtered = apply_consistency_filter(results)
+        assert [r.rank for r in filtered] == [1, 2]

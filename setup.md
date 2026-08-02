@@ -109,10 +109,42 @@ DINOV2_MODEL=facebook/dinov2-base
 
 ## Step 4: Docker Services
 
+> **Important:** `cd docker compose up -d` is **not** valid syntax — `cd` and `docker` are
+> separate commands. Pick one of the options below.
+
+### Option A — Recommended (from repo root)
+
+```bash
+make docker-up
+```
+
+### Option B — From the repo root
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+### Option C — Change into the docker folder first
+
 ```bash
 cd docker
 docker compose up -d
 ```
+
+### First-time checklist (do this before running compose)
+
+```bash
+# 1. Make sure the Docker daemon is actually running.
+#    Docker Desktop must show "Engine running" — not "Docker Desktop is starting...".
+docker info
+
+# 2. Verify you can reach Docker Hub (test a single pull — this is what keeps failing).
+docker pull ollama/ollama:latest
+```
+
+If `docker info` errors with `failed to connect to the docker API at
+npipe:////./pipe/dockerDesktopLinuxEngine`, Docker Desktop is not running yet — see
+Troubleshooting below before retrying compose.
 
 ### Services & Ports
 
@@ -151,8 +183,15 @@ uvicorn src.api.main:app --host 0.0.0.0 --port 8002 --reload
 
 ### With Docker
 ```bash
-cd docker
-docker compose up -d
+# From the repo root (do NOT do `cd docker compose up -d`)
+docker compose -f docker/docker-compose.yml up -d
+```
+
+### One-command start (Windows)
+```powershell
+./start.ps1              # Docker + migrations + API + webhook + worker
+./start.ps1 -NoDocker    # Skip Docker, run Python services only
+./stop.ps1               # Stop everything
 ```
 
 ---
@@ -222,4 +261,54 @@ python -c "import httpx; r = httpx.get('http://localhost:11434/api/tags'); print
 ### Qdrant connection refused
 - Start Docker: `cd docker && docker compose up -d qdrant`
 - Check: `curl http://localhost:6333/healthz`
-en
+
+### Docker daemon not running — "failed to connect to the docker API"
+```
+unable to get image 'docker-admin': failed to connect to the docker API at
+npipe:////./pipe/dockerDesktopLinuxEngine; ... The system cannot find the file specified.
+```
+
+This means **Docker Desktop is not running**. The `docker` CLI can't reach the daemon.
+
+- Start Docker Desktop from the Start menu and **wait** until the status shows **"Engine running"**
+  (the whale icon stops animating).
+- Confirm with: `docker info`
+- Then retry compose.
+
+### `failed to resolve reference "docker.io/ollama/ollama:latest": ... EOF`
+```
+✘ Image ollama/ollama:latest Error failed to resolve reference
+"docker.io/ollama/ollama:latest": ... Head "https://registry-1.docker.io/v2/ollama/ollama/manifests/latest": EOF
+```
+
+This is **not** a bug in the compose file. The Docker daemon is up, but the connection to
+**Docker Hub** (registry-1.docker.io) is being dropped before the pull completes. Try in order:
+
+1. **Just retry** — this is frequently transient:
+   ```bash
+   docker compose -f docker/docker-compose.yml pull ollama
+   docker compose -f docker/docker-compose.yml up -d
+   ```
+2. **Restart Docker Desktop** (tray icon → Restart), wait for "Engine running", retry.
+3. **Check your network**:
+   ```bash
+   # DNS resolution test
+   nslookup registry-1.docker.io
+   # Direct registry reachability
+   Test-NetConnection registry-1.docker.io -Port 443
+   ```
+   If DNS fails or the port test times out, your network/firewall is blocking Docker Hub.
+4. **Disable VPN / proxy** — VPNs and some ISP proxies break the registry connection. If you
+   must keep a proxy, configure it in Docker Desktop → Settings → Resources → Proxies.
+5. **Log in to Docker Hub** — some accounts/rate limits behave differently when logged in:
+   ```bash
+   docker login
+   ```
+6. **Last resort** — restart Docker Desktop and your machine's network stack, then retry.
+
+### Ollama GPU error on Windows
+The compose file requests an NVIDIA GPU for `ollama`. On Windows this requires **Docker
+Desktop with WSL2 + the NVIDIA Container Toolkit** (or GPU-enabled WSL2). If you get a
+`could not select device driver "nvidia"` error, either enable GPU support in Docker Desktop
+(Settings → Resources → WSL) or temporarily remove the `deploy.resources.reservations.devices`
+block from `docker/docker-compose.yml` (Ollama will then run CPU-only).
