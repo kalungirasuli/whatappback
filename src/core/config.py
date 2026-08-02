@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     jwt_access_expire_minutes: int = 4320
     jwt_refresh_expire_days: int = 30
     otp_expire_seconds: int = 300
+    otp_rate_limit_enabled: bool = True
     otp_rate_limit_per_phone: int = 3
     otp_rate_limit_window_seconds: int = 900
 
