@@ -87,7 +87,7 @@ class SearchPipeline:
         preferred_family = family_for_detector_labels(labels)
         try:
             best_conf = max((c.confidence for c in crops if getattr(c, "label", None)), default=0)
-            if best_conf < 0.55:
+            if best_conf < 0.60:
                 preferred_family = None
         except (AttributeError, TypeError):
             pass

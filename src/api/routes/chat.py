@@ -126,6 +126,18 @@ def _build_follow_up(
     }
 
 
+FRIENDLY_DETECTOR_LABEL: dict[str, str] = {
+    "car": "a car", "truck": "a truck", "motorcycle": "a motorcycle",
+    "bicycle": "a bicycle", "cell phone": "a phone", "laptop": "a laptop",
+    "tv": "a TV", "handbag": "a handbag", "backpack": "a backpack",
+    "suitcase": "a suitcase", "bottle": "a bottle", "cup": "a cup",
+    "book": "a book", "keyboard": "a keyboard", "mouse": "a mouse",
+    "remote": "a remote", "watch": "a watch", "shoe": "shoes",
+}
+
+NOISY_LABELS = {"person", "full_image", "object", "tie", "clock", "vase", "umbrella", "baseball glove", "skateboard", "sports ball", "frisbee"}
+
+
 async def _describe_image(image_bytes: bytes) -> str:
     try:
         crops = await _detector.detect_and_crop(image_bytes)
@@ -133,9 +145,14 @@ async def _describe_image(image_bytes: bytes) -> str:
         crops = None
     if crops:
         labels = list(dict.fromkeys(c.label for c in crops if c.label))
-        if labels:
-            return "I see a " + ", ".join(labels) + " in your image"
-    return "I can see an item in your image"
+        confs = [c.confidence for c in crops if c.label]
+        best_conf = max(confs) if confs else 0
+        if best_conf < 0.60:
+            return "Products matching your image"
+        friendly = [FRIENDLY_DETECTOR_LABEL.get(lbl.lower()) or lbl for lbl in labels if lbl.lower() not in NOISY_LABELS]
+        if friendly:
+            return "I see " + ", ".join(friendly[:3]) + " in your image"
+    return "Products matching your image"
 
 
 async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
@@ -383,6 +400,12 @@ async def chat(
             "results": formatted,
         })
 
+        # Override label with actual category when YOLO mislabeled
+        if formatted and desc.lower().startswith("i see"):
+            top_cat = (formatted[0].get("category") or "").lower()
+            if top_cat:
+                sections[-1]["label"] = f"Matching {top_cat}"
+
     combined_text = f"[chat] {text}" if text else "[chat image]"
     await _record_search(redis, user.phone_number, combined_text)
 
@@ -390,12 +413,9 @@ async def chat(
     text_topic, text_family = detect_product_category(text) if has_text else (None, None)
     meta["text_topic"] = text_topic
     meta["text_family"] = text_family
-    visual_section = next(
-        (s for s in sections if s["label"].lower().startswith("i see")), None
-    )
-    if visual_section and visual_section["results"]:
+    if has_images and sections and sections[0]["results"]:
         meta["image_family"] = family_for_category(
-            (visual_section["results"][0].get("category") or "").lower()
+            (sections[0]["results"][0].get("category") or "").lower()
         )
     follow_up = _build_follow_up(text_topic, text_family, meta["image_family"])
 
@@ -422,8 +442,7 @@ async def chat(
         sample_products=ResultCodeService.build_sample_products(all_reranked, all_db_products),
     )
 
-    response_text = _build_response_text(sections, buyer_location is not None)
-    final_text = lisa_text or response_text
+    final_text = lisa_text or "Here's what I found for you!"
 
     # Build multi-message conversation reply
     messages: list[dict] = []
