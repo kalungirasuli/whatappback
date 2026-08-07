@@ -190,6 +190,8 @@ async def _log_and_return(
     reply: dict,
     start: float,
 ) -> dict:
+    thread_messages = _build_thread_messages(meta, reply)
+    meta["thread_messages"] = thread_messages
     try:
         await _chat_log.log(
             db=db,
@@ -206,6 +208,7 @@ async def _log_and_return(
             text_family=meta["text_family"],
             image_family=meta["image_family"],
             reply=reply,
+            thread_messages=thread_messages,
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
     except Exception:
@@ -229,6 +232,76 @@ def _build_top_summary(sections: list[dict]) -> list[dict]:
                 "merchant_name": (item.get("merchant") or {}).get("business_name", "a local seller"),
             })
     return summary
+
+
+def _build_thread_messages(meta: dict, reply: dict) -> list[dict]:
+    """Persist the same structured messages rendered by the frontend."""
+    timestamp = time.strftime("%H:%M")
+    messages: list[dict] = []
+    if meta.get("user_text") or meta.get("image_count"):
+        image_urls = meta.get("image_urls") or []
+        messages.append({
+            "id": f"user-{meta.get('correlation_id') or time.time_ns()}",
+            "sender": "user",
+            "text": meta.get("user_text"),
+            "imageUrl": image_urls[0] if image_urls else None,
+            "imageUrls": image_urls,
+            "imageCaption": meta.get("user_text") if meta.get("image_count") else None,
+            "timestamp": timestamp,
+            "status": "read",
+        })
+
+    server_messages = list(reply.get("messages") or [])
+    follow_up = reply.get("follow_up")
+    if follow_up:
+        prompt = follow_up.get("prompt", "").strip()
+        server_messages = [
+            message for message in server_messages
+            if message.get("text", "").strip() != prompt
+        ]
+
+    response_text = (reply.get("response_text") or "").strip()
+    first_results_index = next(
+        (index for index, message in enumerate(server_messages)
+         if message.get("type") == "search_results"),
+        len(server_messages),
+    )
+    if response_text and not any(
+        message.get("text", "").strip() == response_text for message in server_messages
+    ):
+        server_messages.insert(first_results_index, {"type": "text", "text": response_text})
+
+    last_results_index = max(
+        (index for index, message in enumerate(server_messages)
+         if message.get("type") == "search_results"),
+        default=-1,
+    )
+    for index, message in enumerate(server_messages):
+        is_results = message.get("type") == "search_results"
+        messages.append({
+            "id": f"assistant-{meta.get('correlation_id') or time.time_ns()}-{index}",
+            "sender": "ai",
+            "text": message.get("text") if not is_results else None,
+            "products": [{
+                "label": message.get("label", ""),
+                "total": message.get("total", 0),
+                "results": message.get("results", []),
+            }] if is_results else None,
+            "resultCode": reply.get("result_code") if index == last_results_index else None,
+            "followUp": follow_up if index == last_results_index else None,
+            "timestamp": timestamp,
+        })
+
+    if not server_messages:
+        fallback = reply.get("text") or reply.get("response_text")
+        if fallback:
+            messages.append({
+                "id": f"assistant-{meta.get('correlation_id') or time.time_ns()}",
+                "sender": "ai",
+                "text": fallback,
+                "timestamp": timestamp,
+            })
+    return messages
 
 
 @router.post("")
@@ -517,29 +590,38 @@ async def list_conversations(
 
 @router.get("/conversations/messages")
 async def get_conversation_messages(
-    user=Depends(get_current_user),
+    user=Depends(get_optional_current_user),
+    guest_id: str | None = Header(None, alias="X-Guest-ID"),
     db: AsyncSession = Depends(get_db),
 ):
+    actor_phone = user.phone_number if user else (guest_id or "guest-anonymous")[:20]
     result = await db.execute(
         select(ChatInteraction)
-        .where(ChatInteraction.phone_number == user.phone_number)
+        .where(ChatInteraction.phone_number == actor_phone)
         .order_by(ChatInteraction.created_at.asc())
         .limit(100)
     )
     rows = result.scalars().all()
     messages = []
     for row in rows:
-        messages.append({
-            "id": f"msg-{row.id}",
-            "sender": "user" if row.user_text else "ai",
-            "text": row.user_text,
-            "image_urls": row.image_urls or [],
-            "image_count": row.image_count,
-            "reply_type": row.reply_type,
-            "response_text": row.response_text,
-            "result_code": row.result_code,
-            "top_results": row.top_results,
-            "image_description": row.image_description,
-            "ts": str(row.created_at),
-        })
+        if row.thread_messages:
+            messages.extend(row.thread_messages)
+            continue
+        if row.user_text or row.image_count:
+            messages.append({
+                "id": f"user-{row.id}",
+                "sender": "user",
+                "text": row.user_text,
+                "imageUrl": (row.image_urls or [None])[0],
+                "imageCaption": row.user_text if row.image_count else None,
+                "timestamp": row.created_at.strftime("%H:%M"),
+            })
+        if row.response_text:
+            messages.append({
+                "id": f"assistant-{row.id}",
+                "sender": "ai",
+                "text": row.response_text,
+                "resultCode": row.result_code,
+                "timestamp": row.created_at.strftime("%H:%M"),
+            })
     return {"messages": messages}

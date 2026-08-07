@@ -308,6 +308,7 @@ class ChatInteraction(Base):
     result_code: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
     follow_up: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     top_results: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    thread_messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.datetime.now(datetime.UTC), nullable=False

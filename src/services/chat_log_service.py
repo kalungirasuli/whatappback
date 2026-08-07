@@ -57,6 +57,7 @@ class ChatLogService:
         text_family: str | None,
         image_family: str | None,
         reply: dict[str, Any],
+        thread_messages: list[dict[str, Any]] | None,
         latency_ms: int | None,
     ) -> None:
         row = ChatInteraction(
@@ -77,6 +78,7 @@ class ChatLogService:
             result_code=reply.get("result_code"),
             follow_up=reply.get("follow_up"),
             top_results=self.serialize_top_results(reply.get("sections", [])),
+            thread_messages=thread_messages or [],
             latency_ms=latency_ms,
         )
         db.add(row)
