@@ -6,6 +6,7 @@ from src.services.categories import (
     family_for_category,
     family_for_detector_labels,
 )
+from src.core.config import settings
 from src.services.embedding import EmbeddingService
 from src.services.qdrant_service import QdrantService, SearchResult
 from src.services.reranker import Reranker, RerankedResult
@@ -55,7 +56,7 @@ def apply_consistency_filter(
 
     for i, r in enumerate(filtered, start=1):
         r.rank = i
-        r.match_label = _reranker._match_label(i)
+        r.match_label = _reranker._match_label(r.score)
     return filtered
 
 
@@ -92,6 +93,50 @@ class SearchPipeline:
         except (AttributeError, TypeError):
             pass
         return apply_consistency_filter(reranked, preferred_family=preferred_family)
+
+    async def search_all_objects(
+        self,
+        image_bytes: bytes | None = None,
+        buyer_location: tuple[float, float] | None = None,
+        price_range: tuple[float, float] | None = None,
+    ) -> list[tuple[str, RerankedResult]]:
+        """Search every detected object independently for exact matches."""
+        if not image_bytes:
+            return []
+
+        crops = await _detector.detect_and_crop(image_bytes)
+        if not crops:
+            return []
+
+        exact_matches: list[tuple[str, RerankedResult]] = []
+        threshold = settings.exact_match_threshold
+        seen_product_ids: set[int] = set()
+
+        for crop in crops:
+            label = getattr(crop, "label", "object") or "object"
+            if label == "full_image":
+                continue
+            conf = getattr(crop, "confidence", 0)
+
+            siglip_vec = await _embedding.embed_image(crop.image_bytes)
+            dinov2_vec = await _embedding.embed_image_dinov2(crop.image_bytes)
+
+            hybrid_results = await _qdrant.hybrid_search(siglip_vec, dinov2_vec, top_k=5)
+
+            reranked = _reranker.rerank(
+                results=hybrid_results,
+                query_location=buyer_location,
+                price_range=price_range,
+            )
+
+            preferred_family = family_for_detector_labels([label]) if conf >= 0.60 else None
+            filtered = apply_consistency_filter(reranked, preferred_family=preferred_family)
+
+            if filtered and filtered[0].score >= threshold and filtered[0].product_id not in seen_product_ids:
+                exact_matches.append((label, filtered[0]))
+                seen_product_ids.add(filtered[0].product_id)
+
+        return exact_matches
 
     async def search_by_text(
         self,

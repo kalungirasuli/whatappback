@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.dependencies import get_db, get_redis
-from src.domain.models import User, InterestEvent, Product
+from src.domain.models import User, InterestEvent, Product, ProductImage, Merchant
 from src.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
@@ -97,7 +97,12 @@ async def express_interest(
     db: AsyncSession = Depends(get_db),
 ):
     product_result = await db.execute(
-        select(Product).where(Product.id == product_id)
+        select(Product)
+        .options(
+            selectinload(Product.merchant),
+            selectinload(Product.images),
+        )
+        .where(Product.id == product_id)
     )
     product = product_result.scalar_one_or_none()
 
@@ -122,11 +127,32 @@ async def express_interest(
     await db.commit()
     await db.refresh(interest)
 
+    merchant = product.merchant
     return {
         "id": interest.id,
         "status": interest.status.value,
         "created_at": interest.created_at.isoformat(),
-        "product_id": product_id,
+        "product": {
+            "id": product.id,
+            "name": product.name,
+            "price": product.price,
+            "currency": product.currency,
+            "category": product.category,
+            "brand": product.brand,
+            "stock_qty": product.stock_qty,
+            "images": [
+                {"url": img.storage_url, "is_primary": img.is_primary}
+                for img in product.images
+            ],
+        },
+        "merchant": {
+            "id": merchant.id,
+            "business_name": merchant.business_name,
+            "phone_number": merchant.phone_number,
+            "category": merchant.category,
+            "location_lat": merchant.location_lat,
+            "location_lng": merchant.location_lng,
+        } if merchant else None,
     }
 
 

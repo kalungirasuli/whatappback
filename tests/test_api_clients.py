@@ -135,7 +135,21 @@ class TestInterests:
 
         product = MagicMock()
         product.id = 10
+        product.name = "Test Product"
+        product.price = 100000
+        product.currency = "UGX"
+        product.category = "shoes"
+        product.brand = "Nike"
+        product.stock_qty = 5
         product.merchant_id = 5
+        product.merchant = MagicMock()
+        product.merchant.id = 5
+        product.merchant.business_name = "Test Shop"
+        product.merchant.phone_number = "+256700000000"
+        product.merchant.category = "shoes"
+        product.merchant.location_lat = 0.3
+        product.merchant.location_lng = 32.5
+        product.images = [MagicMock()]
 
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
@@ -163,7 +177,7 @@ class TestInterests:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["product_id"] == 10
+        assert data["product"]["id"] == 10
         assert data["status"] == "sent"
         mock_session.add.assert_called_once()
         mock_session.commit.assert_awaited()

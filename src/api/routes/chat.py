@@ -13,6 +13,7 @@ from src.workers.nlu_router import (
     detect_product_category,
     RegexNLURouter,
 )
+from src.workers.search_pipeline import SearchPipeline
 from src.services.llm_nlu import SearchIntent
 from src.services.categories import family_for_category
 from src.services.detector import ObjectDetector
@@ -126,15 +127,6 @@ def _build_follow_up(
     }
 
 
-FRIENDLY_DETECTOR_LABEL: dict[str, str] = {
-    "car": "a car", "truck": "a truck", "motorcycle": "a motorcycle",
-    "bicycle": "a bicycle", "cell phone": "a phone", "laptop": "a laptop",
-    "tv": "a TV", "handbag": "a handbag", "backpack": "a backpack",
-    "suitcase": "a suitcase", "bottle": "a bottle", "cup": "a cup",
-    "book": "a book", "keyboard": "a keyboard", "mouse": "a mouse",
-    "remote": "a remote", "watch": "a watch", "shoe": "shoes",
-}
-
 NOISY_LABELS = {"person", "full_image", "object", "tie", "clock", "vase", "umbrella", "baseball glove", "skateboard", "sports ball", "frisbee"}
 
 
@@ -144,14 +136,11 @@ async def _describe_image(image_bytes: bytes) -> str:
     except Exception:
         crops = None
     if crops:
-        labels = list(dict.fromkeys(c.label for c in crops if c.label))
-        confs = [c.confidence for c in crops if c.label]
+        labels = [c.label for c in crops if c.label and c.label.lower() not in NOISY_LABELS]
+        confs = [c.confidence for c in crops if c.label and c.label.lower() not in NOISY_LABELS]
         best_conf = max(confs) if confs else 0
-        if best_conf < 0.60:
-            return "Products matching your image"
-        friendly = [FRIENDLY_DETECTOR_LABEL.get(lbl.lower()) or lbl for lbl in labels if lbl.lower() not in NOISY_LABELS]
-        if friendly:
-            return "I see " + ", ".join(friendly[:3]) + " in your image"
+        if best_conf >= 0.60 and labels:
+            return "I see " + ", ".join(labels[:3]) + " in your image"
     return "Products matching your image"
 
 
@@ -368,6 +357,20 @@ async def chat(
             redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
         )
         return await _log_and_return(db, user, meta, reply, start)
+
+    # Multi-object exact match search: each detected object searched independently
+    if has_images:
+        try:
+            multi_pipeline = SearchPipeline()
+            for img_bytes in image_bytes_list:
+                exact_matches = await multi_pipeline.search_all_objects(
+                    image_bytes=img_bytes,
+                    buyer_location=buyer_location,
+                )
+                for label, match in exact_matches:
+                    results.append((f"Exact match: {label}", [match]))
+        except Exception:
+            pass
 
     # Build sections with distance info
     sections = []

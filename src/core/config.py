@@ -62,6 +62,7 @@ class Settings(BaseSettings):
 
     siglip_weight: float = 0.6
     dinov2_weight: float = 0.4
+    exact_match_threshold: float = 0.90
 
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "gemma2:2b"

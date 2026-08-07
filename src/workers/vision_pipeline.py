@@ -1,4 +1,8 @@
+import io
 import logging
+
+import imagehash
+from PIL import Image
 
 from src.services.detector import ObjectDetector
 from src.services.embedding import EmbeddingService
@@ -59,6 +63,13 @@ class VisionPipeline:
         )
         text_vector = await _embedding.embed_text(text_for_embedding)
 
+        # Step 3c: Compute perceptual hash for exact pixel-level matching
+        try:
+            pil_img = Image.open(io.BytesIO(primary_crop))
+            phash = str(imagehash.phash(pil_img))
+        except Exception:
+            phash = ""
+
         # Step 4: Upsert to Qdrant with metadata
         metadata = {
             "product_id": product_id,
@@ -70,6 +81,7 @@ class VisionPipeline:
             "merchant_lat": merchant_lat,
             "merchant_lng": merchant_lng,
             "crops_count": crops_count,
+            "phash": phash,
         }
 
         await _qdrant.upsert_product(

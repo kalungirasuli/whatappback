@@ -155,25 +155,25 @@ class TestPriceScore:
 
 
 class TestMatchLabel:
+    def test_exact_match(self):
+        r = Reranker()
+        assert r._match_label(0.95) == "Exact match"
+        assert r._match_label(0.90) == "Exact match"
+
     def test_closest_match(self):
         r = Reranker()
-        assert r._match_label(1) == "Closest match"
-        assert r._match_label(2) == "Closest match"
+        assert r._match_label(0.75) == "Closest match"
+        assert r._match_label(0.60) == "Closest match"
 
     def test_similar_style(self):
         r = Reranker()
-        assert r._match_label(3) == "Similar style"
-        assert r._match_label(5) == "Similar style"
-
-    def test_nearby_option(self):
-        r = Reranker()
-        assert r._match_label(6) == "Nearby option"
-        assert r._match_label(10) == "Nearby option"
+        assert r._match_label(0.45) == "Similar style"
+        assert r._match_label(0.35) == "Similar style"
 
     def test_related(self):
         r = Reranker()
-        assert r._match_label(11) == "Related"
-        assert r._match_label(50) == "Related"
+        assert r._match_label(0.20) == "Related"
+        assert r._match_label(0.10) == "Related"
 
 
 class TestRerank:
@@ -265,4 +265,4 @@ class TestRerank:
 
         assert len(reranked) == 1
         assert reranked[0].rank == 1
-        assert reranked[0].match_label == "Closest match"
+        assert reranked[0].match_label == "Similar style"

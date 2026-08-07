@@ -109,13 +109,13 @@ class Reranker:
             return self.WEIGHT_PRICE_BOOST
         return 0.0
 
-    def _match_label(self, rank: int) -> str:
-        if rank <= 2:
+    def _match_label(self, score: float) -> str:
+        if score >= 0.90:
+            return "Exact match"
+        elif score >= 0.60:
             return "Closest match"
-        elif rank <= 5:
+        elif score >= 0.35:
             return "Similar style"
-        elif rank <= 10:
-            return "Nearby option"
         return "Related"
 
     def rerank(
@@ -145,7 +145,7 @@ class Reranker:
                     product_id=result.product_id,
                     score=score,
                     rank=rank,
-                    match_label=self._match_label(rank),
+                    match_label=self._match_label(score),
                     metadata=result.metadata,
                 )
             )
