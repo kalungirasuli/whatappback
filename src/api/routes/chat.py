@@ -2,10 +2,12 @@ import math
 import re
 import time
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_db, get_redis
 from src.auth.dependencies import get_current_user
+from src.domain.models import ChatInteraction
 from src.workers.nlu_router import (
     execute_intent_searches,
     detect_product_category,
@@ -293,6 +295,12 @@ async def chat(
     if has_images:
         image_desc = await _describe_image(image_bytes_list[0])
         meta["image_description"] = image_desc
+        # Image-only searches start fresh — old text context doesn't leak
+        if not has_text:
+            try:
+                await redis.delete(f"lisa:history:{user.id}")
+            except Exception:
+                pass
 
     # Lisa reads the full message + history and decides: chat or search.
     turn = await _lisa.decide(redis, user.id, text, has_images, image_note=image_desc)
@@ -394,6 +402,11 @@ async def chat(
     # Lisa writes the natural summary of what was found
     lisa_text = await _lisa.present_results(redis, user.id, _build_top_summary(sections))
 
+    # Lisa's opening message acknowledging the image
+    lisa_opening = ""
+    if has_images and image_desc:
+        lisa_opening = await _lisa.compose_opening(image_desc, text if has_text else "")
+
     # Generate result code
     result_code = await _result_code_service.generate(db)
     first_section = sections[0] if sections else None
@@ -412,17 +425,84 @@ async def chat(
     response_text = _build_response_text(sections, buyer_location is not None)
     final_text = lisa_text or response_text
 
+    # Build multi-message conversation reply
+    messages: list[dict] = []
+    if lisa_opening:
+        messages.append({"type": "text", "text": lisa_opening})
+    for section in sections:
+        messages.append({
+            "type": "search_results",
+            "label": section["label"],
+            "total": section["total"],
+            "results": section["results"],
+        })
+
     reply: dict = {
-        "reply_type": "search_results",
+        "reply_type": "conversation",
         "result_code": result_code,
-        "response_text": f"{final_text}\n\nShare code *{result_code}* with a merchant so they know what you're looking for!",
+        "messages": messages,
+        "response_text": final_text,
         "sections": sections,
     }
     if follow_up:
         reply["follow_up"] = follow_up
-        reply["response_text"] += f"\n\n{follow_up['prompt']}"
+        messages.append({"type": "text", "text": follow_up["prompt"]})
 
     await _lisa.record_turn(
-        redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["response_text"]
+        redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), final_text
     )
     return await _log_and_return(db, user, meta, reply, start)
+
+
+@router.get("/conversations")
+async def list_conversations(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ChatInteraction)
+        .where(ChatInteraction.phone_number == user.phone_number)
+        .order_by(ChatInteraction.created_at.desc())
+        .limit(50)
+    )
+    rows = result.scalars().all()
+    convos: dict[str, dict] = {}
+    for row in rows:
+        key = row.phone_number
+        if key not in convos:
+            convos[key] = {
+                "id": key,
+                "title": "Lisa",
+                "avatar": "/79fd36db-6d51-44a5-af73-bc63277d2b95.jpg",
+                "updated_at": str(row.created_at),
+                "last_message": (row.user_text or "")[:80],
+            }
+    return {"conversations": list(convos.values())}
+
+
+@router.get("/conversations/messages")
+async def get_conversation_messages(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ChatInteraction)
+        .where(ChatInteraction.phone_number == user.phone_number)
+        .order_by(ChatInteraction.created_at.asc())
+        .limit(100)
+    )
+    rows = result.scalars().all()
+    messages = []
+    for row in rows:
+        messages.append({
+            "id": f"msg-{row.id}",
+            "sender": "user" if row.user_text else "ai",
+            "text": row.user_text,
+            "reply_type": row.reply_type,
+            "response_text": row.response_text,
+            "result_code": row.result_code,
+            "top_results": row.top_results,
+            "image_description": row.image_description,
+            "ts": str(row.created_at),
+        })
+    return {"messages": messages}

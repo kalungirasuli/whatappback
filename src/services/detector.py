@@ -108,7 +108,7 @@ class ObjectDetector:
             try:
                 crops = self._yolo_detect(image_bytes)
                 if crops:
-                    logger.info(f"YOLO detected {len(crops)} objects")
+                    logger.info("YOLO detected %d objects: %s", len(crops), ", ".join(f"{c.label} {c.confidence:.0%}" for c in crops))
                     return crops
                 logger.info("YOLO detected no objects, falling back to center crop")
             except Exception as e:

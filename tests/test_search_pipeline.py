@@ -41,7 +41,7 @@ class TestSearchByImage:
     @patch("src.workers.search_pipeline._detector")
     async def test_search_by_image_returns_results(self, mock_det, mock_emb, mock_qdr, mock_rer):
         mock_det.detect_and_crop = AsyncMock(return_value=[
-            MagicMock(image_bytes=b"cropped")
+            MagicMock(image_bytes=b"cropped", label="car", confidence=0.85)
         ])
         mock_emb.embed_image = AsyncMock(return_value=[0.1] * 768)
         mock_emb.embed_image_dinov2 = AsyncMock(return_value=[0.1] * 768)

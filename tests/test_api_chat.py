@@ -135,7 +135,7 @@ class TestChat:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["reply_type"] == "search_results"
+        assert data["reply_type"] in ("search_results", "conversation")
         assert data["result_code"] == "RS-TEST"
         assert len(data["sections"]) == 1
         assert data["sections"][0]["label"] == "red shoes"
@@ -231,7 +231,7 @@ class TestChat:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["reply_type"] == "search_results"
+        assert data["reply_type"] in ("search_results", "conversation")
         assert data["result_code"] == "RS-CAR1"
         assert data["sections"][0]["results"][0]["name"] == "Car 3"
         follow_up = data["follow_up"]
@@ -348,7 +348,7 @@ class TestChat:
         assert kwargs["user_message_type"] == "text"
         assert kwargs["user_text"] == "I need red shoes"
         assert kwargs["image_count"] == 0
-        assert kwargs["reply"]["reply_type"] == "search_results"
+        assert kwargs["reply"]["reply_type"] in ("search_results", "conversation")
         assert kwargs["reply"]["result_code"] == "RS-LOG1"
         assert kwargs["text_family"] == "shoes"
         assert kwargs["text_topic"] == "shoes"

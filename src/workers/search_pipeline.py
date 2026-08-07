@@ -23,21 +23,15 @@ def apply_consistency_filter(
     results: list[RerankedResult],
     preferred_family: str | None = None,
 ) -> list[RerankedResult]:
-    """Drop cross-category pollution and stragglers while never over-filtering.
-
-    - Determines the dominant product family from the detector (preferred) or the
-      top result's category.
-    - Keeps only results in that family (kills phones/shoes leaking into car results).
-    - Applies a score band relative to the top score so weak matches don't surface.
-    - If the family can't be determined, or filtering would empty the list, the
-      original list is preserved.
-    """
+    """Ensures results are from the same product family, with two-way fallback."""
     if not results:
         return results
 
+    top_category_family = family_for_category(results[0].metadata.get("category"))
+
     family = preferred_family
     if family is None:
-        family = family_for_category(results[0].metadata.get("category"))
+        family = top_category_family
 
     filtered = results
     if family is not None:
@@ -45,6 +39,11 @@ def apply_consistency_filter(
             r for r in results
             if family_for_category(r.metadata.get("category")) == family
         ]
+        if not matched and top_category_family is not None:
+            matched = [
+                r for r in results
+                if family_for_category(r.metadata.get("category")) == top_category_family
+            ]
         if matched:
             filtered = matched
 
@@ -86,6 +85,12 @@ class SearchPipeline:
         )
 
         preferred_family = family_for_detector_labels(labels)
+        try:
+            best_conf = max((c.confidence for c in crops if getattr(c, "label", None)), default=0)
+            if best_conf < 0.55:
+                preferred_family = None
+        except (AttributeError, TypeError):
+            pass
         return apply_consistency_filter(reranked, preferred_family=preferred_family)
 
     async def search_by_text(

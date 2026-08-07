@@ -1,0 +1,93 @@
+[
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/cars/ad.jpg",
+    "expected_product_ids": [1],
+    "expected_family": "vehicles",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/cars/bb.jpg",
+    "expected_product_ids": [2],
+    "expected_family": "vehicles",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/cars/ct.jpg",
+    "expected_product_ids": [3],
+    "expected_family": "vehicles",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/cars/r2r.jpg",
+    "expected_product_ids": [4],
+    "expected_family": "vehicles",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/cars/rr.jpg",
+    "expected_product_ids": [5],
+    "expected_family": "vehicles",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/iphones/1p.jpg",
+    "expected_product_ids": [6],
+    "expected_family": "electronics",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/iphones/i17.jpg",
+    "expected_product_ids": [7],
+    "expected_family": "electronics",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/iphones/mi.jpg",
+    "expected_product_ids": [8],
+    "expected_family": "electronics",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/iphones/p8.jpg",
+    "expected_product_ids": [9],
+    "expected_family": "electronics",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/shoes/IMG_20251115_094214.jpg",
+    "expected_product_ids": [10],
+    "expected_family": "shoes",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/shoes/IMG_20251117_091441.jpg",
+    "expected_product_ids": [11],
+    "expected_family": "shoes",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/shoes/IMG_20251118_101349.jpg",
+    "expected_product_ids": [12],
+    "expected_family": "shoes",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/shoes/IMG_20251119_094937.jpg",
+    "expected_product_ids": [13],
+    "expected_family": "shoes",
+    "kind": "exact"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/test car/raptor1.jpg",
+    "expected_product_ids": [12],
+    "expected_family": "shoes",
+    "kind": "exact",
+    "notes": "hard case: baseball glove + skateboard, matches shoe 3"
+  },
+  {
+    "image": "C:/Users/CONRAD/Downloads/images mocks/test car/test car.jpg",
+    "expected_family": "vehicles",
+    "kind": "family",
+    "notes": "real car photo, top-1 must be a vehicle"
+  }
+]

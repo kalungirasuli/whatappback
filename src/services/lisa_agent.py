@@ -52,6 +52,15 @@ PRESENT_PROMPT = (
     "2-3 sentences, friendly, no bullet lists."
 )
 
+OPENING_PROMPT = (
+    "You are Lisa. The customer just sent a photo. You briefly see: \"{image_note}\". "
+    "They may have also written a message: \"{caption}\".\n\n"
+    "Write a SINGLE short, natural WhatsApp message (1 sentence) acknowledging what "
+    "you see and that you're searching for them. Warm, casual, no fluff. "
+    "Example: \"Nice sedan! Let me find similar cars for you.\" or "
+    "\"I can see the shoes — searching now!\" Reply with ONLY the message text."
+)
+
 _FALLBACK_GREETING = (
     "Hey! I'm Lisa 👋 Welcome to whatAppSeller. Tell me what you're looking for or send me "
     "a photo, and I'll find it for you from local sellers!"
@@ -114,7 +123,7 @@ class LisaAgent:
         user_turn = self.user_turn_text(user_text, has_image, image_note)
 
         messages = [{"role": "system", "content": LISA_SYSTEM_PROMPT}]
-        for h in history[-14:]:
+        for h in history[-6:]:
             messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
         messages.append({"role": "user", "content": user_turn})
 
@@ -137,6 +146,22 @@ class LisaAgent:
         if not raw:
             return ""
         return self._extract_reply_text(raw)
+
+    async def compose_opening(self, image_note: str, caption: str = "") -> str:
+        """Write a natural 1-sentence message acknowledging the user's photo."""
+        if not image_note:
+            return "Let me see what you have there..."
+        messages = [
+            {"role": "system", "content": LISA_SYSTEM_PROMPT},
+            {"role": "user", "content": OPENING_PROMPT.format(
+                image_note=image_note, caption=caption or "[no caption]"
+            )},
+        ]
+        raw = await self._call_ollama(messages, force_json=False)
+        if not raw:
+            return "I can see your image - searching now!"
+        text = self._extract_reply_text(raw)
+        return text if text else "I can see your image - searching now!"
 
     async def record_turn(self, redis, user_id: int, user_text: str, reply: str) -> None:
         try:
