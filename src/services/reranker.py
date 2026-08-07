@@ -112,10 +112,6 @@ class Reranker:
     def _match_label(self, score: float) -> str:
         if score >= 0.90:
             return "Exact match"
-        elif score >= 0.60:
-            return "Closest match"
-        elif score >= 0.35:
-            return "Similar style"
         return "Related"
 
     def rerank(

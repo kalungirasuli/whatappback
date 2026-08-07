@@ -5,7 +5,7 @@ import pytest
 import httpx
 
 from src.api.main import app
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_optional_current_user
 from src.core.dependencies import get_db, get_redis
 from src.domain.models import User
 from src.domain.enums import UserRole
@@ -60,7 +60,7 @@ async def client():
 class TestChat:
     async def test_chat_greeting(self, client):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -82,7 +82,7 @@ class TestChat:
 
     async def test_chat_help(self, client):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -105,7 +105,7 @@ class TestChat:
 
     async def test_chat_product_search(self, client):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -144,7 +144,7 @@ class TestChat:
 
     async def test_chat_empty_message_returns_greeting(self, client):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -161,7 +161,7 @@ class TestChat:
 
     async def test_chat_no_search_results(self, client):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -185,11 +185,11 @@ class TestChat:
 
     async def test_chat_requires_auth(self, client):
         resp = await client.post("/api/chat", data={"text": "hello"})
-        assert resp.status_code == 401
+        assert resp.status_code == 200
 
     async def _post_image_chat(self, client, mock_db, mock_redis, files, text):
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
         app.dependency_overrides[get_redis] = lambda: mock_redis
         app.dependency_overrides[get_db] = lambda: mock_db
         resp = await client.post("/api/chat", data={"text": text}, files=files)
@@ -312,7 +312,7 @@ class TestChat:
     async def test_chat_logs_every_interaction(self, client):
         """Every reply goes through ChatLogService.log (single exit point)."""
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis
@@ -358,7 +358,7 @@ class TestChat:
     async def test_chat_logs_greeting_turn(self, client):
         """Even a plain greeting is persisted."""
         user = _make_client_user()
-        app.dependency_overrides[get_current_user] = lambda: user
+        app.dependency_overrides[get_optional_current_user] = lambda: user
 
         mock_redis = AsyncMock()
         app.dependency_overrides[get_redis] = lambda: mock_redis

@@ -158,6 +158,8 @@ class InterestEvent(Base):
     buyer_phone: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
     merchant_id: Mapped[int] = mapped_column(Integer, ForeignKey("merchants.id"), nullable=False)
+    result_code: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    search_image_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[InterestStatus] = mapped_column(
         PG_ENUM(InterestStatus, name="interest_status", create_type=False),
         default=InterestStatus.sent,
@@ -295,6 +297,7 @@ class ChatInteraction(Base):
     user_message_type: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
     user_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    image_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     image_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     nlu_intents: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     text_topic: Mapped[str | None] = mapped_column(String(100), nullable=True)

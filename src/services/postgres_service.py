@@ -1,3 +1,4 @@
+import datetime
 import math
 import logging
 
@@ -26,6 +27,32 @@ async def create_buyer(db: AsyncSession, phone: str) -> Buyer:
     await db.commit()
     await db.refresh(buyer)
     return buyer
+
+
+async def ensure_whatsapp_user(
+    db: AsyncSession,
+    phone: str,
+    role: UserRole = UserRole.client,
+) -> User:
+    result = await db.execute(select(User).where(User.phone_number == phone))
+    user = result.scalar_one_or_none()
+    now = datetime.datetime.now(datetime.UTC)
+    if user is None:
+        user = User(
+            phone_number=phone,
+            role=role,
+            is_verified=True,
+            is_banned=False,
+            created_at=now,
+            last_active_at=now,
+        )
+        db.add(user)
+    else:
+        user.last_active_at = now
+        user.is_verified = True
+    await db.commit()
+    await db.refresh(user)
+    return user
 
 
 async def create_merchant(

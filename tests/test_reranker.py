@@ -162,13 +162,13 @@ class TestMatchLabel:
 
     def test_closest_match(self):
         r = Reranker()
-        assert r._match_label(0.75) == "Closest match"
-        assert r._match_label(0.60) == "Closest match"
+        assert r._match_label(0.75) == "Related"
+        assert r._match_label(0.60) == "Related"
 
     def test_similar_style(self):
         r = Reranker()
-        assert r._match_label(0.45) == "Similar style"
-        assert r._match_label(0.35) == "Similar style"
+        assert r._match_label(0.45) == "Related"
+        assert r._match_label(0.35) == "Related"
 
     def test_related(self):
         r = Reranker()
@@ -265,4 +265,4 @@ class TestRerank:
 
         assert len(reranked) == 1
         assert reranked[0].rank == 1
-        assert reranked[0].match_label == "Similar style"
+        assert reranked[0].match_label == "Related"

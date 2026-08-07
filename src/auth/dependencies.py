@@ -9,6 +9,7 @@ from src.domain.enums import UserRole
 from src.auth.jwt import JWTService
 
 security = HTTPBearer()
+optional_security = HTTPBearer(auto_error=False)
 
 jwt_service = JWTService()
 
@@ -32,6 +33,27 @@ async def get_current_user(
     if user.is_banned:
         raise HTTPException(status_code=403, detail="Account is banned")
 
+    return user
+
+
+async def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(optional_security),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    if credentials is None:
+        return None
+
+    payload = jwt_service.decode_token(credentials.credentials)
+    if payload.get("type") != "access":
+        raise HTTPException(status_code=401, detail="Invalid token type")
+
+    user_id = int(payload.get("sub", 0))
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    if user.is_banned:
+        raise HTTPException(status_code=403, detail="Account is banned")
     return user
 
 

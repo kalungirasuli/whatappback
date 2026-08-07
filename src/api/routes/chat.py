@@ -1,12 +1,12 @@
 import math
 import re
 import time
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_db, get_redis
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_current_user, get_optional_current_user
 from src.domain.models import ChatInteraction
 from src.workers.nlu_router import (
     execute_intent_searches,
@@ -20,6 +20,7 @@ from src.services.detector import ObjectDetector
 from src.services.lisa_agent import LisaAgent
 from src.services.result_code_service import ResultCodeService
 from src.services.chat_log_service import ChatLogService
+from src.services.object_storage import upload_image
 from src.shared.correlation import get_correlation_id
 from src.shared.reqlog import (
     file_meta,
@@ -198,6 +199,7 @@ async def _log_and_return(
             user_message_type=meta["user_message_type"],
             user_text=meta["user_text"],
             image_count=meta["image_count"],
+            image_urls=meta["image_urls"],
             image_description=meta["image_description"],
             nlu_intents=meta["intents"],
             text_topic=meta["text_topic"],
@@ -235,22 +237,31 @@ async def chat(
     files: list[UploadFile] | None = File(None),
     lat: float | None = Query(None),
     lng: float | None = Query(None),
-    user=Depends(get_current_user),
+    user=Depends(get_optional_current_user),
+    guest_id: str | None = Header(None, alias="X-Guest-ID"),
     db: AsyncSession = Depends(get_db),
     redis=Depends(get_redis),
 ):
     start = time.perf_counter()
     image_bytes_list: list[bytes] = []
+    image_urls: list[str] = []
     if files:
         for f in files:
             content = await f.read()
             if len(content) > 10 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail=f"File {f.filename} exceeds 10MB limit")
             image_bytes_list.append(content)
+            try:
+                image_urls.append(await upload_image(content, f.content_type or "image/jpeg"))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Failed to persist chat image")
 
     has_text = bool(text.strip())
     has_images = bool(image_bytes_list)
     buyer_location = (lat, lng) if lat is not None and lng is not None else None
+    actor_phone = user.phone_number if user else (guest_id or "guest-anonymous")[:20]
+    actor_key = user.id if user else actor_phone
 
     log_chat_input(
         user=user,
@@ -275,12 +286,13 @@ async def chat(
         user_message_type = "empty"
 
     meta: dict = {
-        "user_id": user.id,
-        "phone_number": user.phone_number,
+        "user_id": user.id if user else None,
+        "phone_number": actor_phone,
         "correlation_id": get_correlation_id() or None,
         "user_message_type": user_message_type,
         "user_text": text if has_text else None,
         "image_count": len(image_bytes_list),
+        "image_urls": image_urls,
         "image_description": None,
         "intents": [],
         "text_topic": None,
@@ -292,7 +304,7 @@ async def chat(
         return await _log_and_return(db, user, meta, {"reply_type": "text", "text": _GREETING_TEXT}, start)
 
     # Recall by RS- code
-    if has_text and _RECALL_CODE_RE.match(text):
+    if has_text and _RECALL_CODE_RE.match(text) and user:
         return await _log_and_return(
             db, user, meta, await _handle_recall(text.strip(), db, user), start
         )
@@ -304,19 +316,19 @@ async def chat(
         # Image-only searches start fresh — old text context doesn't leak
         if not has_text:
             try:
-                await redis.delete(f"lisa:history:{user.id}")
+                await redis.delete(f"lisa:history:{actor_key}")
             except Exception:
                 pass
 
     # Lisa reads the full message + history and decides: chat or search.
-    turn = await _lisa.decide(redis, user.id, text, has_images, image_note=image_desc)
+    turn = await _lisa.decide(redis, actor_key, text, has_images, image_note=image_desc)
     log_chat_turn(action=turn.action, search_text=turn.search_text, reply=turn.reply)
 
     # A photo ALWAYS means search — never reply without searching the image.
     if turn.action != "search" and not has_images:
         reply = {"reply_type": "text", "text": turn.reply}
         await _lisa.record_turn(
-            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), turn.reply
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), turn.reply
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -341,7 +353,7 @@ async def chat(
     if not search_intents:
         reply = {"reply_type": "text", "text": "What would you like me to look for? Describe it or send a photo."}
         await _lisa.record_turn(
-            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -354,7 +366,7 @@ async def chat(
     if not any(reranked for _, reranked in results):
         reply = {"reply_type": "text", "text": "Sorry, I searched but couldn't find matching products right now. Try a different description or check back later!"}
         await _lisa.record_turn(
-            redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -410,7 +422,7 @@ async def chat(
                 sections[-1]["label"] = f"Matching {top_cat}"
 
     combined_text = f"[chat] {text}" if text else "[chat image]"
-    await _record_search(redis, user.phone_number, combined_text)
+    await _record_search(redis, actor_phone, combined_text)
 
     # Customer-relations follow-up when caption and image disagree
     text_topic, text_family = detect_product_category(text) if has_text else (None, None)
@@ -423,7 +435,7 @@ async def chat(
     follow_up = _build_follow_up(text_topic, text_family, meta["image_family"])
 
     # Lisa writes the natural summary of what was found
-    lisa_text = await _lisa.present_results(redis, user.id, _build_top_summary(sections))
+    lisa_text = await _lisa.present_results(redis, actor_key, _build_top_summary(sections))
 
     # Lisa's opening message acknowledging the image
     lisa_opening = ""
@@ -437,7 +449,7 @@ async def chat(
     await _result_code_service.store(
         db=db,
         code=result_code,
-        user_id=user.id,
+        user_id=user.id if user else None,
         search_query=text if has_text else None,
         image_description=first_intent.description if first_intent and first_intent.type == "visual_search" else None,
         category=first_section["results"][0].get("category") if first_section and first_section["results"] else None,
@@ -462,6 +474,7 @@ async def chat(
     reply: dict = {
         "reply_type": "conversation",
         "result_code": result_code,
+        "image_urls": image_urls,
         "messages": messages,
         "response_text": final_text,
         "sections": sections,
@@ -471,7 +484,7 @@ async def chat(
         messages.append({"type": "text", "text": follow_up["prompt"]})
 
     await _lisa.record_turn(
-        redis, user.id, _lisa.user_turn_text(text, has_images, image_desc), final_text
+        redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), final_text
     )
     return await _log_and_return(db, user, meta, reply, start)
 
@@ -520,6 +533,8 @@ async def get_conversation_messages(
             "id": f"msg-{row.id}",
             "sender": "user" if row.user_text else "ai",
             "text": row.user_text,
+            "image_urls": row.image_urls or [],
+            "image_count": row.image_count,
             "reply_type": row.reply_type,
             "response_text": row.response_text,
             "result_code": row.result_code,

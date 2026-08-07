@@ -1,12 +1,12 @@
 ﻿import json
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.core.dependencies import get_db, get_redis
-from src.domain.models import User, InterestEvent, Product, ProductImage, Merchant
+from src.domain.models import ChatInteraction, User, InterestEvent, Product
 from src.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
@@ -73,6 +73,11 @@ async def list_interests(
             "id": ie.id,
             "status": ie.status.value,
             "created_at": ie.created_at.isoformat(),
+            "result_code": ie.result_code,
+            "search_images": [
+                {"url": url, "is_primary": index == 0}
+                for index, url in enumerate(ie.search_image_urls or [])
+            ],
             "product": {
                 "id": ie.product.id,
                 "name": ie.product.name,
@@ -93,6 +98,7 @@ async def list_interests(
 @router.post("/me/interests/{product_id}")
 async def express_interest(
     product_id: int,
+    result_code: str | None = Query(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -118,10 +124,27 @@ async def express_interest(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Interest already expressed for this product")
 
+    search_image_urls: list[str] = []
+    if result_code:
+        interaction_result = await db.execute(
+            select(ChatInteraction)
+            .where(
+                ChatInteraction.phone_number == user.phone_number,
+                ChatInteraction.result_code == result_code.upper(),
+            )
+            .order_by(desc(ChatInteraction.created_at))
+            .limit(1)
+        )
+        interaction = interaction_result.scalar_one_or_none()
+        if interaction:
+            search_image_urls = list(interaction.image_urls or [])
+
     interest = InterestEvent(
         buyer_phone=user.phone_number,
         product_id=product_id,
         merchant_id=product.merchant_id,
+        result_code=result_code.upper() if result_code else None,
+        search_image_urls=search_image_urls,
     )
     db.add(interest)
     await db.commit()
@@ -132,6 +155,11 @@ async def express_interest(
         "id": interest.id,
         "status": interest.status.value,
         "created_at": interest.created_at.isoformat(),
+        "result_code": interest.result_code,
+        "search_images": [
+            {"url": url, "is_primary": index == 0}
+            for index, url in enumerate(interest.search_image_urls or [])
+        ],
         "product": {
             "id": product.id,
             "name": product.name,

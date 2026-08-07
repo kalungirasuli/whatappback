@@ -3,7 +3,13 @@ import asyncio
 from src.core.dependencies import async_session_factory, get_redis
 from src.domain.commands import is_merchant_command
 from src.services.redis_service import get_session, get_wizard_step
-from src.services.postgres_service import get_merchant_by_phone, get_buyer_by_phone
+from src.services.postgres_service import (
+    create_buyer,
+    ensure_whatsapp_user,
+    get_buyer_by_phone,
+    get_merchant_by_phone,
+)
+from src.domain.enums import UserRole
 from src.workers.queue import register_handler, process_queue
 from src.workers.nlu_router import extract_nlu, execute_intent_searches, compose_multi_intent_reply, process_batch
 from src.services.whatsapp import send_text, download_media
@@ -31,6 +37,16 @@ async def route_message(payload: dict) -> None:
         redis = await get_redis()
         merchant = await get_merchant_by_phone(db, from_number)
         buyer = await get_buyer_by_phone(db, from_number)
+
+        # WhatsApp phone numbers are already verified by the channel. Create the
+        # application identity on first contact without asking for OTP.
+        await ensure_whatsapp_user(
+            db,
+            from_number,
+            UserRole.merchant if merchant else UserRole.client,
+        )
+        if not merchant and buyer is None:
+            buyer = await create_buyer(db, from_number)
 
         if buyer and buyer.is_banned:
             return
