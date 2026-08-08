@@ -9,13 +9,33 @@ from sqlalchemy.orm import selectinload
 from src.core.dependencies import get_db
 from src.domain.models import Product, ProductImage, Merchant, User
 from src.domain.enums import ProductStatus
-from src.auth.dependencies import require_merchant
+from src.auth.dependencies import get_current_user
 from src.services.object_storage import upload_image, delete_image
 from src.services.qdrant_service import QdrantService
 
 router = APIRouter(prefix="/api/products", tags=["products"])
 
 qdrant_service = QdrantService()
+
+
+async def _owned_merchant(db: AsyncSession, phone_number: str, merchant_id: int | None = None) -> Merchant:
+    if merchant_id is not None:
+        result = await db.execute(
+            select(Merchant).where(
+                Merchant.id == merchant_id,
+                Merchant.phone_number == phone_number,
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Merchant)
+            .where(Merchant.phone_number == phone_number)
+            .order_by(Merchant.created_at.desc())
+        )
+    merchant = result.scalar_one_or_none()
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    return merchant
 
 
 def _parse_attributes(raw: str | None) -> dict:
@@ -30,12 +50,23 @@ def _parse_attributes(raw: str | None) -> dict:
 
 @router.get("")
 async def list_my_products(
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
+    if merchant_id is not None:
+        result = await db.execute(
+            select(Merchant).where(
+                Merchant.id == merchant_id,
+                Merchant.phone_number == user.phone_number,
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Merchant)
+            .where(Merchant.phone_number == user.phone_number)
+            .order_by(Merchant.created_at.desc())
+        )
     db_merchant = result.scalar_one_or_none()
     if not db_merchant:
         raise HTTPException(status_code=404, detail="Merchant profile not found")
@@ -75,18 +106,14 @@ async def create_product(
     name: str,
     category: str,
     price: float,
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     brand: str | None = None,
     attributes: str | None = None,
     stock_qty: int = 0,
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
-    db_merchant = result.scalar_one_or_none()
-    if not db_merchant:
-        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    db_merchant = await _owned_merchant(db, user.phone_number, merchant_id)
 
     product = Product(
         merchant_id=db_merchant.id,
@@ -258,7 +285,7 @@ async def get_product(
 @router.put("/{product_id}")
 async def update_product(
     product_id: int,
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     name: str | None = None,
     brand: str | None = None,
@@ -266,13 +293,9 @@ async def update_product(
     price: float | None = None,
     attributes: str | None = None,
     stock_qty: int | None = None,
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
-    db_merchant = result.scalar_one_or_none()
-    if not db_merchant:
-        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    db_merchant = await _owned_merchant(db, user.phone_number, merchant_id)
 
     result = await db.execute(
         select(Product).where(
@@ -337,15 +360,11 @@ async def update_product(
 @router.delete("/{product_id}")
 async def delete_product(
     product_id: int,
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
-    db_merchant = result.scalar_one_or_none()
-    if not db_merchant:
-        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    db_merchant = await _owned_merchant(db, user.phone_number, merchant_id)
 
     result = await db.execute(
         select(Product).where(
@@ -372,15 +391,11 @@ async def delete_product(
 async def upload_product_image(
     product_id: int,
     file: UploadFile = File(...),
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
-    db_merchant = result.scalar_one_or_none()
-    if not db_merchant:
-        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    db_merchant = await _owned_merchant(db, user.phone_number, merchant_id)
 
     result = await db.execute(
         select(Product).where(
@@ -448,15 +463,11 @@ async def upload_product_image(
 async def delete_product_image(
     product_id: int,
     image_id: int,
-    merchant: User = Depends(require_merchant),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    merchant_id: int | None = None,
 ):
-    result = await db.execute(
-        select(Merchant).where(Merchant.phone_number == merchant.phone_number)
-    )
-    db_merchant = result.scalar_one_or_none()
-    if not db_merchant:
-        raise HTTPException(status_code=404, detail="Merchant profile not found")
+    db_merchant = await _owned_merchant(db, user.phone_number, merchant_id)
 
     result = await db.execute(
         select(Product).where(

@@ -5,7 +5,7 @@ import pytest
 import httpx
 
 from src.api.main import app
-from src.auth.dependencies import get_current_user, require_merchant
+from src.auth.dependencies import get_current_user
 from src.core.dependencies import get_db
 from src.domain.models import User, Merchant, Product, ProductImage
 from src.domain.enums import UserRole, ProductStatus
@@ -94,11 +94,11 @@ async def client():
 
 
 class TestCreateProduct:
-    async def test_create_product_as_merchant(self, client):
+    async def test_create_product_as_shop_owner(self, client):
         merchant_user = _make_merchant_user()
         db_merchant = _mock_merchant()
 
-        app.dependency_overrides[require_merchant] = lambda: merchant_user
+        app.dependency_overrides[get_current_user] = lambda: merchant_user
 
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
@@ -132,11 +132,14 @@ class TestCreateProduct:
         mock_session.add.assert_called_once()
         mock_session.commit.assert_awaited()
 
-    async def test_create_product_as_client_forbidden(self, client):
+    async def test_create_product_without_shop_not_found(self, client):
         client_user = _make_client_user()
         app.dependency_overrides[get_current_user] = lambda: client_user
 
         mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _mock_result(scalar_value=None),
+        ]
         app.dependency_overrides[get_db] = lambda: mock_session
 
         resp = await client.post(
@@ -144,7 +147,8 @@ class TestCreateProduct:
             params={"name": "Shirt", "category": "Clothing", "price": 50000},
         )
 
-        assert resp.status_code == 403
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
 
 
 class TestListMerchantProducts:
@@ -153,7 +157,7 @@ class TestListMerchantProducts:
         db_merchant = _mock_merchant()
         product = _mock_product()
 
-        app.dependency_overrides[require_merchant] = lambda: merchant_user
+        app.dependency_overrides[get_current_user] = lambda: merchant_user
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [
@@ -196,7 +200,7 @@ class TestUpdateProduct:
         db_merchant = _mock_merchant()
         product = _mock_product()
 
-        app.dependency_overrides[require_merchant] = lambda: merchant_user
+        app.dependency_overrides[get_current_user] = lambda: merchant_user
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [
@@ -221,7 +225,7 @@ class TestUpdateProduct:
         merchant_user = _make_merchant_user(user_id=1, phone="256700000000")
         db_merchant = _mock_merchant(merchant_id=1)
 
-        app.dependency_overrides[require_merchant] = lambda: merchant_user
+        app.dependency_overrides[get_current_user] = lambda: merchant_user
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [
@@ -246,7 +250,7 @@ class TestDeleteProduct:
         product = _mock_product()
         product.qdrant_point_id = None
 
-        app.dependency_overrides[require_merchant] = lambda: merchant_user
+        app.dependency_overrides[get_current_user] = lambda: merchant_user
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [

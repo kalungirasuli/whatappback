@@ -8,10 +8,81 @@ from sqlalchemy.orm import selectinload
 from src.core.dependencies import get_db
 from src.domain.models import User, Merchant, Product, InterestEvent, MerchantSubscription, SubscriptionPlan
 from src.domain.enums import ProductStatus, MerchantStatus, UserRole
-from src.auth.dependencies import require_merchant, get_current_user
+from src.auth.dependencies import get_current_user, require_merchant
 from src.services.postgres_service import create_merchant
 
 router = APIRouter(prefix="/api/merchants", tags=["merchants"])
+
+
+def _shop_payload(merchant: Merchant, product_count: int = 0) -> dict:
+    return {
+        "id": merchant.id,
+        "phone_number": merchant.phone_number,
+        "business_name": merchant.business_name,
+        "category": merchant.category,
+        "location_lat": merchant.location_lat,
+        "location_lng": merchant.location_lng,
+        "status": merchant.status.value,
+        "product_count": product_count,
+        "created_at": merchant.created_at.isoformat(),
+    }
+
+
+async def _get_owned_shop(db: AsyncSession, phone_number: str, merchant_id: int | None = None) -> Merchant:
+    if merchant_id is not None:
+        result = await db.execute(
+            select(Merchant).where(
+                Merchant.id == merchant_id,
+                Merchant.phone_number == phone_number,
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Merchant)
+            .where(Merchant.phone_number == phone_number)
+            .order_by(Merchant.created_at.desc())
+        )
+    merchant = result.scalar_one_or_none()
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return merchant
+
+
+async def _shop_product_counts(db: AsyncSession, merchant_ids: list[int]) -> dict[int, int]:
+    if not merchant_ids:
+        return {}
+    result = await db.execute(
+        select(Product.merchant_id, func.count(Product.id))
+        .where(Product.merchant_id.in_(merchant_ids))
+        .group_by(Product.merchant_id)
+    )
+    return dict(result.all())
+
+
+@router.get("/me/shops")
+async def list_my_shops(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Merchant)
+        .where(Merchant.phone_number == user.phone_number)
+        .order_by(Merchant.created_at.desc())
+    )
+    shops = list(result.scalars().all())
+    counts = await _shop_product_counts(db, [shop.id for shop in shops])
+    return [_shop_payload(shop, counts.get(shop.id, 0)) for shop in shops]
+
+
+@router.get("/{merchant_id}")
+async def get_shop(
+    merchant_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    merchant = await _get_owned_shop(db, user.phone_number, merchant_id)
+    counts = await _shop_product_counts(db, [merchant.id])
+    return _shop_payload(merchant, counts.get(merchant.id, 0))
 
 
 @router.get("/me/dashboard")

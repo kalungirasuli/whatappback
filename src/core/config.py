@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -74,6 +75,7 @@ class Settings(BaseSettings):
     llm_model: str = "gemma2:2b"
 
     log_level: str = "INFO"
+    app_mode: str = Field(default="free", validation_alias="WHATSAPPSELLER_MODE")
 
 
 settings = Settings()
