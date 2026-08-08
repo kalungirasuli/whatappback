@@ -21,34 +21,34 @@ OLLAMA_CHAT_URL = f"{settings.ollama_url}/api/chat"
 
 LISA_SYSTEM_PROMPT = (
     "You are Lisa, the friendly sales assistant for whatAppSeller — a WhatsApp marketplace "
-    "where people buy and sell in Uganda. You chat naturally and help buyers find products.\n\n"
+    "where people buy and sell in Any country but morjarly Uganda. You chat naturally and help buyers find products.\n\n"
     "Personality:\n"
     "- Warm, upbeat, quick-witted. Match the customer's tone (casual stays casual).\n"
-    "- Reply like a real WhatsApp chat, not a robot. Short, natural sentences. No canned option lists.\n"
+    "- Reply like a real WhatsApp chat, not a robot. medium, natural sentences. No canned option lists.\n"
     "- Prices are in UGX (Ugandan shillings).\n\n"
-    "Your job:\n"
-    "1. Read the customer's WHOLE message and the conversation history.\n"
-    "2. Decide: is there enough info to search the product catalog, or should you keep chatting "
-    "or ask 1-2 short questions first?\n"
-    "3. A photo means SEARCH using the image — never chat without searching when a photo is sent.\n"
-    "4. If the customer changes topic or adds details, search for the new thing too.\n\n"
+    "Conversation rules:\n"
+    "1. Read the customer's WHOLE message, conversation history, and current stage.\n"
+    "2. Be conversation-first. Do not search just because someone says 'need', 'want', or names a broad category.\n"
+    "3. For vague requests, stay in chat and ask 1-4 useful questions about type, budget, colour, brand, size, or occasion.\n"
+    "4. If the customer is answering your earlier questions and the accumulated context now identifies a product plus useful details, search without asking the same question again.\n"
+    "5. Search when the customer explicitly asks to find/search/show products, gives a specific request with useful details, or sends a photo.\n"
+    "6. A photo always means SEARCH using the image. After results, keep the customer engaged and invite refinement.\n\n"
     'Respond with ONE JSON object and nothing else. Format:\n'
     '{"action": "search" or "chat", "search_text": "short clean product phrase", "reply": "your message"}\n\n'
     'Rules:\n'
-    '- "search": when the customer clearly wants a product (or sent a photo). '
+    '- "search": only for an explicit product-search request, a sufficiently specific request, or a photo. '
     'search_text = the product phrase, e.g. "red nike running shoes". '
     'reply = a short friendly line introducing the search (may be an empty string).\n'
-    '- "chat": when there is no clear product to search yet. Greet, chat, or ask 1-2 short '
-    'questions to narrow it down. reply = your full chat message.\n'
+    '- "chat": for greetings, vague requests, and context gathering. Ask a useful question rather than searching.\n'
 )
 
 PRESENT_PROMPT = (
     "You are Lisa. You searched the catalog and these are the ACTUAL top matches:\n"
     "{results_summary}\n\n"
-    "Write a short, natural WhatsApp message presenting these exact products. "
+    "Write a medium, natural WhatsApp message presenting these exact products and keep the customer engaged. "
     "Use ONLY the product names and prices listed above — never invent brands, colours, "
     "models or prices. Mention 1-2 top picks exactly as named. Invite them to tap "
-    "\"I'm interested\" on a product they like, or tell you what to refine. "
+    "\"I'm interested\" on a product they like, and ask one natural question about what to refine next. "
     "2-3 sentences, friendly, no bullet lists."
 )
 
@@ -78,16 +78,38 @@ _FALLBACK_ASK = (
     "a photo and I'll find it for you."
 )
 
-_LOOKS_LIKE_PRODUCT_RE = re.compile(
-    r"\b(looking for|search|find|do you have|where can i get|need|want|"
-    r"sell me|interested|buy|show me|price|how much|cost|any)\b",
+_FALLBACK_CLARIFY = (
+    "I can help with that. What kind are you after, and do you have a budget, colour, "
+    "brand, size, or occasion in mind?"
+)
+
+_EXPLICIT_SEARCH_RE = re.compile(
+    r"\b(search|search for|find|find me|show me|show us|look for|looking for|"
+    r"where can i get|do you have|send me|give me|locate|browse)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_TERM_RE = re.compile(
+    r"\b(car|cars|vehicle|phone|phones|laptop|shoe|shoes|sneaker|shirt|dress|"
+    r"trouser|trousers|clothes|furniture|bag|bags|watch|computer|bike|motorcycle)\b",
+    re.IGNORECASE,
+)
+_DETAIL_RE = re.compile(
+    r"\b(red|blue|black|white|green|nike|adidas|samsung|iphone|under|below|above|"
+    r"over|budget|cheap|expensive|size|small|medium|large|new|used|automatic|manual|"
+    r"occasion|work|school|wedding|men|women|male|female|million|k|ugx|shilling)\b",
+    re.IGNORECASE,
+)
+_SEARCH_DETAIL_RE = re.compile(
+    r"\b(under|below|above|over|budget|size|k|ugx|million|cheap|expensive)\b|\d",
     re.IGNORECASE,
 )
 _GREETING_RE = re.compile(r"\b(hello|hi|hey|yo|sup|how are you|good (morning|afternoon|evening))\b", re.IGNORECASE)
 _HELP_RE = re.compile(r"\b(help|how to|what can i do|how do i|instructions|guide)\b", re.IGNORECASE)
 
 _HISTORY_KEY = "lisa:history:{user_id}"
+_STAGE_KEY = "lisa:stage:{user_id}"
 _HISTORY_LIMIT = 20
+_DEFAULT_STAGE = "greeting"
 
 
 class AgentTurn:
@@ -114,13 +136,15 @@ class LisaAgent:
     async def decide(
         self,
         redis,
-        user_id: int,
+        user_id: int | str,
         user_text: str,
         has_image: bool,
         image_note: str = "",
     ) -> AgentTurn:
         history = await self._load_history(redis, user_id)
+        stage = await self._load_stage(redis, user_id)
         user_turn = self.user_turn_text(user_text, has_image, image_note)
+        user_turn = f"[Conversation stage: {stage}]\n{user_turn}" if user_turn else f"[Conversation stage: {stage}]"
 
         messages = [{"role": "system", "content": LISA_SYSTEM_PROMPT}]
         for h in history[-6:]:
@@ -128,7 +152,30 @@ class LisaAgent:
         messages.append({"role": "user", "content": user_turn})
 
         raw = await self._call_ollama(messages)
-        return self._parse_decision(raw, user_text, has_image)
+        turn = self._parse_decision(raw, user_text, has_image)
+
+        explicit_search = self._has_explicit_search(user_text)
+        context_product = self._history_has_product_term(history)
+        specific_request = self._has_specific_request(user_text) or (
+            stage in ("gathering", "post_results")
+            and context_product
+            and bool(_SEARCH_DETAIL_RE.search(user_text or ""))
+        )
+        context_search_text = self._context_search_text(history, user_text)
+        if not has_image and turn.action == "search" and not (explicit_search or specific_request):
+            turn = AgentTurn(action="chat", reply=_FALLBACK_CLARIFY, raw=turn.raw)
+        elif not has_image and turn.action == "chat" and (explicit_search or specific_request):
+            turn = AgentTurn(
+                action="search",
+                reply=turn.reply,
+                search_text=(turn.search_text or context_search_text or user_text or "").strip(),
+                raw=turn.raw,
+            )
+        elif turn.action == "search" and not turn.search_text:
+            turn.search_text = context_search_text
+
+        await self._set_stage(redis, user_id, "ready" if turn.action == "search" else "gathering")
+        return turn
 
     async def present_results(self, redis, user_id: int, top_results: list[dict]) -> str:
         if not top_results:
@@ -163,12 +210,21 @@ class LisaAgent:
         text = self._extract_reply_text(raw)
         return text if text else "I can see your image - searching now!"
 
-    async def record_turn(self, redis, user_id: int, user_text: str, reply: str) -> None:
+    async def record_turn(
+        self,
+        redis,
+        user_id: int | str,
+        user_text: str,
+        reply: str,
+        stage: str | None = None,
+    ) -> None:
         try:
             key = _HISTORY_KEY.format(user_id=user_id)
             entries = await self._load_history(redis, user_id)
             entries.append({"role": "user", "content": user_text or ""})
             entries.append({"role": "assistant", "content": reply or ""})
+            if stage:
+                await self._set_stage(redis, user_id, stage)
             await redis.set(key, json.dumps(entries[-_HISTORY_LIMIT:]))
         except Exception:
             logger.exception("Failed to record Lisa conversation turn")
@@ -269,17 +325,58 @@ class LisaAgent:
 
         return self._fallback_decision(user_text, has_image)
 
+    @staticmethod
+    def _has_explicit_search(user_text: str) -> bool:
+        return bool(_EXPLICIT_SEARCH_RE.search(user_text or "") and _PRODUCT_TERM_RE.search(user_text or ""))
+
+    @staticmethod
+    def _has_specific_request(user_text: str) -> bool:
+        text = user_text or ""
+        return bool(_PRODUCT_TERM_RE.search(text) and _DETAIL_RE.search(text))
+
+    @staticmethod
+    def _history_has_product_term(history: list[dict]) -> bool:
+        return any(
+            _PRODUCT_TERM_RE.search(str(entry.get("content") or ""))
+            for entry in history
+            if entry.get("role") == "user"
+        )
+
+    @staticmethod
+    def _context_search_text(history: list[dict], user_text: str) -> str:
+        parts = [
+            str(entry.get("content") or "").strip()
+            for entry in history[-8:]
+            if entry.get("role") == "user" and str(entry.get("content") or "").strip()
+        ]
+        if user_text and user_text.strip():
+            parts.append(user_text.strip())
+        return " ".join(parts)
+
     def _fallback_decision(self, user_text: str, has_image: bool) -> AgentTurn:
         lower = (user_text or "").lower()
         if _HELP_RE.search(lower):
             return AgentTurn(action="chat", reply=_FALLBACK_HELP)
-        if _GREETING_RE.search(lower) and not _LOOKS_LIKE_PRODUCT_RE.search(lower):
+        if _GREETING_RE.search(lower) and not self._has_explicit_search(lower):
             return AgentTurn(action="chat", reply=_FALLBACK_GREETING)
-        if has_image or _LOOKS_LIKE_PRODUCT_RE.search(lower):
+        if has_image or self._has_explicit_search(lower) or self._has_specific_request(lower):
             return AgentTurn(action="search", search_text=(user_text or "").strip())
-        return AgentTurn(action="chat", reply=_FALLBACK_ASK)
+        return AgentTurn(action="chat", reply=_FALLBACK_CLARIFY)
 
-    async def _load_history(self, redis, user_id: int) -> list[dict]:
+    async def _load_stage(self, redis, user_id: int | str) -> str:
+        try:
+            stage = await redis.get(_STAGE_KEY.format(user_id=user_id))
+            return stage or _DEFAULT_STAGE
+        except Exception:
+            return _DEFAULT_STAGE
+
+    async def _set_stage(self, redis, user_id: int | str, stage: str) -> None:
+        try:
+            await redis.set(_STAGE_KEY.format(user_id=user_id), stage)
+        except Exception:
+            logger.exception("Failed to save Lisa conversation stage")
+
+    async def _load_history(self, redis, user_id: int | str) -> list[dict]:
         try:
             raw = await redis.get(_HISTORY_KEY.format(user_id=user_id))
         except Exception:

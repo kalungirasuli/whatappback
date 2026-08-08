@@ -1,4 +1,5 @@
 import datetime
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import select, func
@@ -15,6 +16,16 @@ from src.services.qdrant_service import QdrantService
 router = APIRouter(prefix="/api/products", tags=["products"])
 
 qdrant_service = QdrantService()
+
+
+def _parse_attributes(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 @router.get("")
@@ -43,6 +54,7 @@ async def list_my_products(
             "name": p.name,
             "brand": p.brand,
             "category": p.category,
+            "attributes": p.attributes or {},
             "price": p.price,
             "currency": p.currency,
             "stock_qty": p.stock_qty,
@@ -66,6 +78,7 @@ async def create_product(
     merchant: User = Depends(require_merchant),
     db: AsyncSession = Depends(get_db),
     brand: str | None = None,
+    attributes: str | None = None,
     stock_qty: int = 0,
 ):
     result = await db.execute(
@@ -80,6 +93,7 @@ async def create_product(
         name=name,
         brand=brand,
         category=category,
+        attributes=_parse_attributes(attributes),
         price=price,
         stock_qty=stock_qty,
         status=ProductStatus.pending_moderation,
@@ -93,6 +107,7 @@ async def create_product(
         "name": product.name,
         "brand": product.brand,
         "category": product.category,
+        "attributes": product.attributes or {},
         "price": product.price,
         "currency": product.currency,
         "stock_qty": product.stock_qty,
@@ -132,6 +147,7 @@ async def list_latest_products(
                 "name": p.name,
                 "brand": p.brand,
                 "category": p.category,
+                "attributes": p.attributes or {},
                 "price": p.price,
                 "currency": p.currency,
                 "stock_qty": p.stock_qty,
@@ -220,6 +236,7 @@ async def get_product(
         "name": product.name,
         "brand": product.brand,
         "category": product.category,
+        "attributes": product.attributes or {},
         "price": product.price,
         "currency": product.currency,
         "stock_qty": product.stock_qty,
@@ -247,6 +264,7 @@ async def update_product(
     brand: str | None = None,
     category: str | None = None,
     price: float | None = None,
+    attributes: str | None = None,
     stock_qty: int | None = None,
 ):
     result = await db.execute(
@@ -274,6 +292,8 @@ async def update_product(
         product.category = category
     if price is not None:
         product.price = price
+    if attributes is not None:
+        product.attributes = _parse_attributes(attributes)
     if stock_qty is not None:
         product.stock_qty = stock_qty
 
@@ -288,6 +308,8 @@ async def update_product(
         changed["category"] = category
     if price is not None:
         changed["price"] = price
+    if attributes is not None:
+        changed["attributes"] = product.attributes or {}
 
     if changed:
         try:
@@ -303,6 +325,7 @@ async def update_product(
         "name": product.name,
         "brand": product.brand,
         "category": product.category,
+        "attributes": product.attributes or {},
         "price": product.price,
         "currency": product.currency,
         "stock_qty": product.stock_qty,
@@ -402,6 +425,7 @@ async def upload_product_image(
                 product_name=product.name,
                 product_category=product.category,
                 product_brand=product.brand or "",
+                product_attributes=product.attributes or {},
                 product_price=product.price,
                 merchant_lat=db_merchant.location_lat,
                 merchant_lng=db_merchant.location_lng,

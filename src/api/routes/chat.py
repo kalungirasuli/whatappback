@@ -386,12 +386,6 @@ async def chat(
     if has_images:
         image_desc = await _describe_image(image_bytes_list[0])
         meta["image_description"] = image_desc
-        # Image-only searches start fresh — old text context doesn't leak
-        if not has_text:
-            try:
-                await redis.delete(f"lisa:history:{actor_key}")
-            except Exception:
-                pass
 
     # Lisa reads the full message + history and decides: chat or search.
     turn = await _lisa.decide(redis, actor_key, text, has_images, image_note=image_desc)
@@ -401,7 +395,7 @@ async def chat(
     if turn.action != "search" and not has_images:
         reply = {"reply_type": "text", "text": turn.reply}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), turn.reply
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), turn.reply, "gathering"
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -426,7 +420,7 @@ async def chat(
     if not search_intents:
         reply = {"reply_type": "text", "text": "What would you like me to look for? Describe it or send a photo."}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -439,7 +433,7 @@ async def chat(
     if not any(reranked for _, reranked in results):
         reply = {"reply_type": "text", "text": "Sorry, I searched but couldn't find matching products right now. Try a different description or check back later!"}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"]
+            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
         )
         return await _log_and_return(db, user, meta, reply, start)
 
@@ -530,7 +524,10 @@ async def chat(
         sample_products=ResultCodeService.build_sample_products(all_reranked, all_db_products),
     )
 
-    final_text = lisa_text or "Here's what I found for you!"
+    final_text = lisa_text or (
+        "Here's what I found for you! Which option should we explore, or would you like me "
+        "to refine by price, style, or location?"
+    )
 
     # Build multi-message conversation reply
     messages: list[dict] = []
@@ -557,7 +554,7 @@ async def chat(
         messages.append({"type": "text", "text": follow_up["prompt"]})
 
     await _lisa.record_turn(
-        redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), final_text
+        redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), final_text, "post_results"
     )
     return await _log_and_return(db, user, meta, reply, start)
 

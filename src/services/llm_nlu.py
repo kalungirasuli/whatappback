@@ -54,13 +54,17 @@ A single message may contain MULTIPLE intents. For example:
 - [SHOE IMAGE] + "Also do you have blue shirts?" = visual_search + product_search
 - "I need a phone and also a case" = product_search + product_search
 
-For product_search, extract entities:
-- product_name: the product the user described
-- color: color mentioned
-- category: electronics, clothing, shoes, furniture, beauty, food, accessories, groceries
+For product_search, extract generic entities for ANY product or item:
+- product_name or item_type: the item described; do not restrict it to a fixed category list
+- brand, model, variant
+- color, gender, size, material, style, condition, occasion
+- specifications: an object for arbitrary details such as ram, storage, capacity, year, dimensions
 - price_min: minimum price (number, in UGX)
 - price_max: maximum price (number, in UGX)
 - location: location mentioned (e.g. Kampala)
+- normalized_query: a clean search phrase containing the important item and attributes
+
+Preserve unknown product names and attributes exactly when you cannot classify them. Do not invent missing values.
 
 Respond with valid JSON only, no other text. Output format:
 {
@@ -68,7 +72,18 @@ Respond with valid JSON only, no other text. Output format:
     {
       "type": "visual_search",
       "description": "description of what they're looking for",
-      "entities": {}
+      "entities": {
+        "product_name": "",
+        "item_type": "",
+        "brand": "",
+        "model": "",
+        "attributes": {},
+        "specifications": {},
+        "price_min": null,
+        "price_max": null,
+        "location": "",
+        "normalized_query": ""
+      }
     }
   ]
 }

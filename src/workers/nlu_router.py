@@ -41,7 +41,7 @@ _GREETING_KEYWORDS = re.compile(
 )
 
 _PRICE_REGEX = re.compile(
-    r"(\d[\d,\.]*)\s*(ugx|shs|shillings?|ug\s*shs?)?",
+    r"(?<!\w)(\d[\d,]*(?:\.\d+)?)\s*(k|m|b|ugx|shs|shillings?|ug\s*shs?)?\b",
     re.IGNORECASE,
 )
 
@@ -51,6 +51,13 @@ _COLOR_KEYWORDS = {
     "beige", "maroon", "olive", "cyan", "magenta", "ivory", "tan", "coral",
     "salmon", "lavender", "indigo", "turquoise", "crimson", "charcoal",
 }
+
+_GENDER_RE = re.compile(r"\b(men(?:'s)?|women(?:'s)?|male|female|unisex|boys?|girls?)\b", re.IGNORECASE)
+_SIZE_RE = re.compile(r"\bsize\s*[:#-]?\s*([a-z0-9][a-z0-9./+-]*)\b", re.IGNORECASE)
+_BRAND_RE = re.compile(r"\b(?:brand|by|from)\s+([a-z0-9][a-z0-9&' -]{1,40})", re.IGNORECASE)
+_MODEL_RE = re.compile(r"\bmodel\s+([a-z0-9][a-z0-9&' -]{1,40})", re.IGNORECASE)
+_MATERIAL_RE = re.compile(r"\b(?:made of|material(?: is)?|fabric)\s+([a-z][a-z -]{1,30})", re.IGNORECASE)
+_STYLE_RE = re.compile(r"\b(?:style|type|kind)\s+([a-z][a-z -]{1,30})", re.IGNORECASE)
 
 _CATEGORY_KEYWORDS = {
     "electronics": ["phone", "laptop", "tablet", "headphone", "speaker", "charger", "cable", "camera", "tv", "monitor", "keyboard", "mouse", "earbuds", "powerbank"],
@@ -150,17 +157,42 @@ class RegexNLURouter:
             return entities
 
         words = text.split()
-        prices = []
+        prices: list[float] = []
+        price_bounds: list[tuple[float, str]] = []
         for match in _PRICE_REGEX.finditer(text):
-            raw = match.group(1).replace(",", "").replace(".", "")
+            raw = match.group(1)
+            unit = (match.group(2) or "").lower().replace(" ", "")
             try:
-                prices.append(float(raw))
+                value = float(raw.replace(",", ""))
+                if unit == "k":
+                    value *= 1_000
+                elif unit == "m":
+                    value *= 1_000_000
+                elif unit == "b":
+                    value *= 1_000_000_000
+                elif unit in {"ugx", "shs", "shilling", "shillings", "ugshs"}:
+                    pass
+                else:
+                    before = text[max(0, match.start() - 18):match.start()].lower()
+                    if (
+                        float(raw.replace(",", "")) < 1000
+                        and not re.search(r"\b(under|below|above|over|price|cost|budget|up to|maximum|minimum)\b", before)
+                    ):
+                        continue
+                before = text[max(0, match.start() - 24):match.start()].lower()
+                bound = "max" if re.search(r"\b(under|below|up to|maximum)\b", before) else "min" if re.search(r"\b(above|over|minimum)\b", before) else "exact"
+                prices.append(value)
+                price_bounds.append((value, bound))
             except ValueError:
                 pass
         if prices:
-            if len(prices) == 1:
+            if len(prices) == 1 and price_bounds[0][1] == "max":
                 entities["price_max"] = prices[0]
+            elif len(prices) == 1 and price_bounds[0][1] == "min":
                 entities["price_min"] = prices[0]
+            elif len(prices) == 1:
+                entities["price_min"] = prices[0]
+                entities["price_max"] = prices[0]
             else:
                 entities["price_min"] = min(prices)
                 entities["price_max"] = max(prices)
@@ -169,6 +201,24 @@ class RegexNLURouter:
         found_colors = [c for c in _COLOR_KEYWORDS if re.search(rf"\b{re.escape(c)}\b", text_lower)]
         if found_colors:
             entities["color"] = found_colors[0] if len(found_colors) == 1 else found_colors
+
+        attributes: dict[str, Any] = {}
+        if found_colors:
+            attributes["color"] = entities["color"]
+        gender = _GENDER_RE.search(text)
+        if gender:
+            attributes["gender"] = gender.group(1).lower().replace("'s", "")
+            entities["gender"] = attributes["gender"]
+        size = _SIZE_RE.search(text)
+        if size:
+            attributes["size"] = size.group(1)
+            entities["size"] = size.group(1)
+        for key, pattern in (("brand", _BRAND_RE), ("model", _MODEL_RE), ("material", _MATERIAL_RE), ("style", _STYLE_RE)):
+            match = pattern.search(text)
+            if match:
+                value = match.group(1).strip(" ,.!?")
+                attributes[key] = value
+                entities[key] = value
 
         found_categories = []
         for category, keywords in _CATEGORY_KEYWORDS.items():
@@ -207,6 +257,15 @@ class RegexNLURouter:
         loc_match = re.search(r"\b(?:in|at|near|around)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", text)
         if loc_match:
             entities["location"] = loc_match.group(1)
+
+        if attributes:
+            entities["attributes"] = attributes
+        if "price_min" in entities or "price_max" in entities:
+            entities["constraints"] = {
+                key: entities[key]
+                for key in ("price_min", "price_max")
+                if key in entities
+            }
 
         return entities
 
@@ -266,21 +325,32 @@ async def extract_nlu(message_text: str, has_image: bool = False) -> NLUResult:
 
 
 def _price_range_from_entities(entities: dict) -> tuple[float, float] | None:
-    if "price_min" in entities and "price_max" in entities:
-        return (entities["price_min"], entities["price_max"])
-    if "price_max" in entities:
-        return (0.0, entities["price_max"])
+    constraints = entities.get("constraints") or {}
+    price_min = entities.get("price_min", constraints.get("price_min"))
+    price_max = entities.get("price_max", constraints.get("price_max"))
+    if price_min is not None and price_max is not None:
+        return (float(price_min), float(price_max))
+    if price_max is not None:
+        return (0.0, float(price_max))
     return None
 
 
 def _build_search_text(entities: dict, original_text: str) -> str:
-    if "product_name" in entities:
-        name = entities["product_name"]
-        color = entities.get("color", "")
-        category = entities.get("category", "")
-        parts = [name, color, category]
-        return " ".join(p for p in parts if p)
-    return original_text
+    parts: list[str] = []
+    for key in ("product_name", "item_type", "category", "brand", "model", "variant", "gender", "size", "color", "material", "style", "condition", "occasion"):
+        value = entities.get(key)
+        if value:
+            parts.extend(value if isinstance(value, list) else [str(value)])
+    for key, value in (entities.get("attributes") or {}).items():
+        if value:
+            parts.extend([str(key), *(value if isinstance(value, list) else [str(value)])])
+    for key, value in (entities.get("specifications") or {}).items():
+        parts.extend([str(key), str(value)])
+    if parts:
+        return " ".join(dict.fromkeys(p for p in parts if p)).strip()
+    if entities.get("normalized_query"):
+        return str(entities["normalized_query"]).strip()
+    return original_text.strip()
 
 
 async def execute_intent_searches(
@@ -301,6 +371,8 @@ async def execute_intent_searches(
             if current:
                 search_results = await pipeline.search_by_image(
                     image_bytes=current,
+                    query_text=_build_search_text(intent.entities, "") if intent.entities else None,
+                    query_entities=intent.entities,
                     buyer_location=buyer_location,
                     price_range=_price_range_from_entities(intent.entities),
                 )
@@ -311,6 +383,7 @@ async def execute_intent_searches(
             search_text = _build_search_text(intent.entities, intent.description)
             search_results = await pipeline.search_by_text(
                 text=search_text,
+                query_entities=intent.entities,
                 buyer_location=buyer_location,
                 price_range=_price_range_from_entities(intent.entities),
             )

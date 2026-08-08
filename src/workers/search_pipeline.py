@@ -64,6 +64,8 @@ class SearchPipeline:
     async def search_by_image(
         self,
         image_bytes: bytes | None = None,
+        query_text: str | None = None,
+        query_entities: dict | None = None,
         buyer_location: tuple[float, float] | None = None,
         price_range: tuple[float, float] | None = None,
     ) -> list[RerankedResult]:
@@ -81,6 +83,8 @@ class SearchPipeline:
 
         reranked = _reranker.rerank(
             results=hybrid_results,
+            query_text=query_text,
+            query_entities=query_entities,
             query_location=buyer_location,
             price_range=price_range,
         )
@@ -141,6 +145,7 @@ class SearchPipeline:
     async def search_by_text(
         self,
         text: str,
+        query_entities: dict | None = None,
         buyer_location: tuple[float, float] | None = None,
         price_range: tuple[float, float] | None = None,
     ) -> list[RerankedResult]:
@@ -158,6 +163,7 @@ class SearchPipeline:
         reranked = _reranker.rerank(
             results=raw_results,
             query_text=text,
+            query_entities=query_entities,
             query_location=buyer_location,
             price_range=price_range,
         )

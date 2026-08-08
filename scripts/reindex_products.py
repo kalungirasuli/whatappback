@@ -84,6 +84,7 @@ async def main() -> None:
                     product_name=product.name,
                     product_category=product.category,
                     product_brand=product.brand or "",
+                    product_attributes=product.attributes or {},
                     product_price=float(product.price),
                     merchant_lat=merchant.location_lat if merchant else None,
                     merchant_lng=merchant.location_lng if merchant else None,

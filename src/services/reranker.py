@@ -21,6 +21,7 @@ class Reranker:
     WEIGHT_LOCATION_BOOST_CLOSE = 0.15
     WEIGHT_LOCATION_BOOST_MID = 0.05
     WEIGHT_PRICE_BOOST = 0.1
+    WEIGHT_ENTITY_BOOST = 0.08
 
     def _haversine_km(
         self, lat1: float, lon1: float, lat2: float, lon2: float
@@ -109,6 +110,42 @@ class Reranker:
             return self.WEIGHT_PRICE_BOOST
         return 0.0
 
+    def _entity_match_score(
+        self,
+        query_entities: dict[str, Any] | None,
+        metadata: dict[str, Any],
+    ) -> float:
+        if not query_entities:
+            return 0.0
+
+        product_attributes = metadata.get("attributes") or {}
+        if not isinstance(product_attributes, dict):
+            product_attributes = {}
+        query_attributes = query_entities.get("attributes") or {}
+        if not isinstance(query_attributes, dict):
+            query_attributes = {}
+
+        keys = {
+            "product_name", "item_type", "category", "brand", "model", "variant",
+            "gender", "size", "color", "material", "style", "condition", "occasion",
+        }
+        matches = 0
+        checked = 0
+        for key in keys:
+            query_value = query_entities.get(key, query_attributes.get(key))
+            product_value = metadata.get(key, product_attributes.get(key))
+            if not query_value or not product_value:
+                continue
+            checked += 1
+            query_words = set(re.findall(r"\w+", str(query_value).lower()))
+            product_words = set(re.findall(r"\w+", str(product_value).lower()))
+            if query_words and query_words.intersection(product_words):
+                matches += 1
+
+        if not checked:
+            return 0.0
+        return min(self.WEIGHT_ENTITY_BOOST * matches, 0.24)
+
     def _match_label(self, score: float) -> str:
         if score >= 0.90:
             return "Exact match"
@@ -118,6 +155,7 @@ class Reranker:
         self,
         results: list[SearchResult],
         query_text: str | None = None,
+        query_entities: dict[str, Any] | None = None,
         query_location: tuple[float, float] | None = None,
         price_range: tuple[float, float] | None = None,
     ) -> list[RerankedResult]:
@@ -126,10 +164,11 @@ class Reranker:
         for result in results:
             base = result.score * self.WEIGHT_BASE
             text_boost = self._text_match_score(query_text, result.metadata)
+            entity_boost = self._entity_match_score(query_entities, result.metadata)
             location_boost = self._location_score(query_location, result.metadata)
             price_boost = self._price_score(price_range, result.metadata)
 
-            total = base + text_boost + location_boost + price_boost
+            total = base + text_boost + entity_boost + location_boost + price_boost
             scored.append((total, result))
 
         scored.sort(key=lambda x: x[0], reverse=True)

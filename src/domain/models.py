@@ -57,6 +57,7 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     brand: Mapped[str | None] = mapped_column(String(100), nullable=True)
     category: Mapped[str] = mapped_column(String(100), nullable=False)
+    attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     price: Mapped[float] = mapped_column(Float, nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="UGX", nullable=False)
     stock_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

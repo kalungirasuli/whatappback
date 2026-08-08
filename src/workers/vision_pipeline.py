@@ -26,6 +26,7 @@ class VisionPipeline:
         product_name: str = "",
         product_category: str = "",
         product_brand: str = "",
+        product_attributes: dict | None = None,
         product_price: float = 0.0,
         merchant_lat: float | None = None,
         merchant_lng: float | None = None,
@@ -58,8 +59,14 @@ class VisionPipeline:
         dinov2_vector = await _embedding.embed_image_dinov2(primary_crop)
 
         # Step 3b: Embed the product text for text-based search
+        attributes = product_attributes or {}
+        attribute_text = " ".join(
+            f"{key} {value}"
+            for key, value in attributes.items()
+            if value is not None and value != ""
+        )
         text_for_embedding = " ".join(
-            p for p in [product_name, product_brand, product_category] if p
+            p for p in [product_name, product_brand, product_category, attribute_text] if p
         )
         text_vector = await _embedding.embed_text(text_for_embedding)
 
@@ -77,6 +84,7 @@ class VisionPipeline:
             "product_name": product_name,
             "category": product_category,
             "brand": product_brand,
+            "attributes": attributes,
             "price": product_price,
             "merchant_lat": merchant_lat,
             "merchant_lng": merchant_lng,
