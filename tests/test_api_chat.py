@@ -463,3 +463,80 @@ class TestChat:
         kwargs = mock_log.await_args.kwargs
         assert kwargs["reply"]["reply_type"] == "text"
         assert kwargs["image_count"] == 0
+
+
+class TestRecall:
+    async def test_recall_returns_full_product_sections(self, client):
+        """Pasting an RS- code returns sections with images so the frontend
+        renders product cards (and the closest match image) for the recall."""
+        user = _make_client_user()
+        app.dependency_overrides[get_optional_current_user] = lambda: user
+
+        mock_redis = AsyncMock()
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+
+        mock_product = _mock_product(product_id=7)
+        mock_product.images = [
+            MagicMock(storage_url="https://cdn/shoes.jpg", is_primary=True)
+        ]
+        mock_db = AsyncMock()
+        mock_db.execute.return_value = MagicMock(
+            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[mock_product])))
+        )
+        app.dependency_overrides[get_db] = lambda: mock_db
+
+        with patch(
+            "src.api.routes.chat._result_code_service.lookup",
+            new_callable=AsyncMock,
+        ) as mock_lookup:
+            mock_lookup.return_value = {
+                "code": "RS-ABC1",
+                "search_query": "black sky",
+                "image_description": None,
+                "category": "skies",
+                "price_min": None,
+                "price_max": None,
+                "product_count": 1,
+                "product_ids": [7],
+                "sample_products": [{"name": "black sky", "price": 1500}],
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+
+            resp = await client.post("/api/chat", data={"text": "RS-ABC1"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reply_type"] == "recall"
+        assert data["result_code"] == "RS-ABC1"
+        assert len(data["sections"]) == 1
+        section = data["sections"][0]
+        assert section["results"][0]["product_id"] == 7
+        assert section["results"][0]["name"] == "Shirt"
+        assert section["results"][0]["images"][0]["url"] == "https://cdn/shoes.jpg"
+        assert section["results"][0]["images"][0]["is_primary"] is True
+        assert section["results"][0]["match_label"] == "Exact match"
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["type"] == "search_results"
+
+    async def test_recall_unknown_code_returns_text(self, client):
+        user = _make_client_user()
+        app.dependency_overrides[get_optional_current_user] = lambda: user
+
+        mock_redis = AsyncMock()
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+
+        mock_db = AsyncMock()
+        app.dependency_overrides[get_db] = lambda: mock_db
+
+        with patch(
+            "src.api.routes.chat._result_code_service.lookup",
+            new_callable=AsyncMock,
+        ) as mock_lookup:
+            mock_lookup.return_value = None
+
+            resp = await client.post("/api/chat", data={"text": "RS-NOPE"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reply_type"] == "text"
+        assert "couldn't find" in data["text"]

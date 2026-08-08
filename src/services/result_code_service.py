@@ -70,6 +70,7 @@ class ResultCodeService:
             "price_min": record.price_min,
             "price_max": record.price_max,
             "product_count": len(record.product_ids),
+            "product_ids": list(record.product_ids),
             "sample_products": record.sample_products,
             "created_at": record.created_at.isoformat() if record.created_at else None,
         }

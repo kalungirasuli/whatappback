@@ -19,6 +19,7 @@ from src.workers.nlu_router import (
 )
 from src.workers.search_pipeline import SearchPipeline
 from src.services.llm_nlu import SearchIntent
+from src.services.reranker import RerankedResult
 from src.services.categories import family_for_category
 from src.services.detector import ObjectDetector
 from src.services.lisa_agent import LisaAgent
@@ -159,6 +160,26 @@ async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
             "reply_type": "text",
             "text": f"I couldn't find any results for code *{code.upper()}*. Double-check the code and try again."
         }
+    product_ids = lookup.get("product_ids") or []
+    db_products = await _load_products(product_ids, db)
+    reranked = [
+        RerankedResult(
+            product_id=pid,
+            score=max(0.5, 1.0 - index * 0.05),
+            rank=index + 1,
+            match_label="Exact match" if index == 0 else "Related",
+        )
+        for index, pid in enumerate(product_ids)
+    ]
+    formatted = _format_results(reranked, db_products)
+    if formatted:
+        sections = [{
+            "label": lookup.get("category") or "Your saved results",
+            "total": len(formatted),
+            "results": formatted,
+        }]
+    else:
+        sections = []
     return {
         "reply_type": "recall",
         "result_code": lookup["code"],
@@ -169,6 +190,13 @@ async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
         "price_max": lookup["price_max"],
         "product_count": lookup["product_count"],
         "sample_products": lookup["sample_products"],
+        "sections": sections,
+        "messages": [{
+            "type": "search_results",
+            "label": sections[0]["label"] if sections else "Your saved results",
+            "total": sections[0]["total"] if sections else 0,
+            "results": sections[0]["results"] if sections else [],
+        }] if sections else [],
         "text": (
             f"Here's what you were looking for earlier! "
             f"{'You searched for: ' + lookup['search_query'] if lookup['search_query'] else ''}"
