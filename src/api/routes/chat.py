@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.dependencies import get_db, get_redis
 from src.auth.dependencies import get_current_user, get_optional_current_user
 from src.domain.enums import MessageRole
-from src.domain.models import ChatInteraction, Conversation, ConversationMessage
+from src.domain.models import ChatInteraction, Conversation, ConversationMessage, InterestEvent
 from src.services.conversation_context import ConversationContext
 from src.workers.nlu_router import (
     execute_intent_searches,
@@ -153,6 +153,17 @@ async def _describe_image(image_bytes: bytes) -> str:
     return "Products matching your image"
 
 
+async def _liked_product_ids(db: AsyncSession, user) -> set[int]:
+    if not user or not getattr(user, "phone_number", None):
+        return set()
+    result = await db.execute(
+        select(InterestEvent.product_id).where(
+            InterestEvent.buyer_phone == user.phone_number
+        )
+    )
+    return set(result.scalars().all())
+
+
 async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
     lookup = await _result_code_service.lookup(db, code)
     if not lookup:
@@ -160,12 +171,22 @@ async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
             "reply_type": "text",
             "text": f"I couldn't find any results for code *{code.upper()}*. Double-check the code and try again."
         }
-    product_ids = lookup.get("product_ids") or []
+    # Only recall the closest match plus any related products the user liked;
+    # unliked related items are not returned. The closest match stays the main
+    # result of the response.
+    saved_ids = lookup.get("product_ids") or []
+    liked_ids = await _liked_product_ids(db, user)
+    if saved_ids:
+        closest_id = saved_ids[0]
+        product_ids = [closest_id, *[pid for pid in saved_ids[1:] if pid in liked_ids]]
+    else:
+        product_ids = []
+
     db_products = await _load_products(product_ids, db)
     reranked = [
         RerankedResult(
             product_id=pid,
-            score=max(0.5, 1.0 - index * 0.05),
+            score=1.0 if index == 0 else 0.4,
             rank=index + 1,
             match_label="Exact match" if index == 0 else "Related",
         )
@@ -552,6 +573,22 @@ async def chat(
         buyer_location=buyer_location,
     )
 
+    # Multi-object exact match search: each detected object searched independently.
+    # Run before the no-match check so Yolo-detected objects can still return
+    # results even if the main search pipeline found none.
+    if has_images:
+        try:
+            multi_pipeline = SearchPipeline()
+            for img_bytes in image_bytes_list:
+                exact_matches = await multi_pipeline.search_all_objects(
+                    image_bytes=img_bytes,
+                    buyer_location=buyer_location,
+                )
+                for label, match in exact_matches:
+                    results.append((f"Exact match: {label}", [match]))
+        except Exception:
+            pass
+
     if not any(reranked for _, reranked in results):
         no_match_text = await compose_no_match_reply(turn.search_text or text)
         reply = {"reply_type": "text", "text": no_match_text}
@@ -566,20 +603,6 @@ async def chat(
         return await _log_and_return(
             db, user, meta, reply, start, redis=redis, conversation=conversation
         )
-
-    # Multi-object exact match search: each detected object searched independently
-    if has_images:
-        try:
-            multi_pipeline = SearchPipeline()
-            for img_bytes in image_bytes_list:
-                exact_matches = await multi_pipeline.search_all_objects(
-                    image_bytes=img_bytes,
-                    buyer_location=buyer_location,
-                )
-                for label, match in exact_matches:
-                    results.append((f"Exact match: {label}", [match]))
-        except Exception:
-            pass
 
     # Build sections with distance info
     sections = []

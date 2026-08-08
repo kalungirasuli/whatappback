@@ -113,7 +113,8 @@ class SearchPipeline:
             return []
 
         exact_matches: list[tuple[str, RerankedResult]] = []
-        threshold = settings.exact_match_threshold
+        exact_threshold = settings.exact_match_threshold
+        min_score = 0.30
         seen_product_ids: set[int] = set()
 
         for crop in crops:
@@ -125,7 +126,7 @@ class SearchPipeline:
             siglip_vec = await _embedding.embed_image(crop.image_bytes)
             dinov2_vec = await _embedding.embed_image_dinov2(crop.image_bytes)
 
-            hybrid_results = await _qdrant.hybrid_search(siglip_vec, dinov2_vec, top_k=5)
+            hybrid_results = await _qdrant.hybrid_search(siglip_vec, dinov2_vec, top_k=10)
 
             reranked = _reranker.rerank(
                 results=hybrid_results,
@@ -136,9 +137,20 @@ class SearchPipeline:
             preferred_family = family_for_detector_labels([label]) if conf >= 0.60 else None
             filtered = apply_consistency_filter(reranked, preferred_family=preferred_family)
 
-            if filtered and filtered[0].score >= threshold and filtered[0].product_id not in seen_product_ids:
-                exact_matches.append((label, filtered[0]))
-                seen_product_ids.add(filtered[0].product_id)
+            if not filtered:
+                continue
+
+            top_result = filtered[0]
+            if top_result.score < min_score or top_result.product_id in seen_product_ids:
+                continue
+
+            section_label = (
+                f"Exact match: {label}"
+                if top_result.score >= exact_threshold
+                else f"Related match: {label}"
+            )
+            exact_matches.append((section_label, top_result))
+            seen_product_ids.add(top_result.product_id)
 
         return exact_matches
 

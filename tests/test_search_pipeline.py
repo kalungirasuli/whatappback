@@ -117,6 +117,28 @@ class TestSearchByImage:
         call_kwargs = mock_rer.rerank.call_args
         assert call_kwargs.kwargs["price_range"] == price_range
 
+    @patch("src.workers.search_pipeline._reranker")
+    @patch("src.workers.search_pipeline._qdrant")
+    @patch("src.workers.search_pipeline._embedding")
+    @patch("src.workers.search_pipeline._detector")
+    async def test_search_all_objects_returns_exact_or_related_match(
+        self, mock_det, mock_emb, mock_qdr, mock_rer
+    ):
+        mock_det.detect_and_crop = AsyncMock(return_value=[
+            MagicMock(image_bytes=b"crop1", label="truck", confidence=0.85),
+        ])
+        mock_emb.embed_image = AsyncMock(return_value=[0.0] * 768)
+        mock_emb.embed_image_dinov2 = AsyncMock(return_value=[0.0] * 768)
+        mock_qdr.hybrid_search = AsyncMock(return_value=[_make_search_result(1, score=0.55)])
+        mock_rer.rerank = MagicMock(return_value=[_make_reranked(1, rank=1)])
+
+        pipeline = SearchPipeline()
+        results = await pipeline.search_all_objects(image_bytes=_make_image_bytes())
+
+        assert len(results) == 1
+        assert results[0][0].startswith("Exact match") or results[0][0].startswith("Related match")
+        assert results[0][1].product_id == 1
+
 
 class TestSearchByText:
     @patch("src.workers.search_pipeline._reranker")

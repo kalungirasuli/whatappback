@@ -466,6 +466,20 @@ class TestChat:
 
 
 class TestRecall:
+    async def _recall_db(self, products):
+        """db mock: interest query returns [], product query returns `products`."""
+        mock_db = AsyncMock()
+        product_result = MagicMock(
+            scalars=MagicMock(
+                return_value=MagicMock(all=MagicMock(return_value=products))
+            )
+        )
+        mock_db.execute.side_effect = [
+            MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),  # liked ids
+            product_result,
+        ]
+        return mock_db
+
     async def test_recall_returns_full_product_sections(self, client):
         """Pasting an RS- code returns sections with images so the frontend
         renders product cards (and the closest match image) for the recall."""
@@ -479,10 +493,7 @@ class TestRecall:
         mock_product.images = [
             MagicMock(storage_url="https://cdn/shoes.jpg", is_primary=True)
         ]
-        mock_db = AsyncMock()
-        mock_db.execute.return_value = MagicMock(
-            scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[mock_product])))
-        )
+        mock_db = await self._recall_db([mock_product])
         app.dependency_overrides[get_db] = lambda: mock_db
 
         with patch(
@@ -517,6 +528,55 @@ class TestRecall:
         assert section["results"][0]["match_label"] == "Exact match"
         assert len(data["messages"]) == 1
         assert data["messages"][0]["type"] == "search_results"
+
+    async def test_recall_drops_unliked_related_but_keeps_closest(self, client):
+        """On recall, only the closest match and liked related products are
+        returned; unliked related items are dropped."""
+        user = _make_client_user()
+        app.dependency_overrides[get_optional_current_user] = lambda: user
+
+        mock_redis = AsyncMock()
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+
+        closest = _mock_product(product_id=1)
+        liked_related = _mock_product(product_id=2)
+        unliked_related = _mock_product(product_id=3)
+        mock_db = await self._recall_db([closest, liked_related, unliked_related])
+        app.dependency_overrides[get_db] = lambda: mock_db
+
+        with (
+            patch(
+                "src.api.routes.chat._result_code_service.lookup",
+                new_callable=AsyncMock,
+            ) as mock_lookup,
+            patch(
+                "src.api.routes.chat._liked_product_ids",
+                new_callable=AsyncMock,
+            ) as mock_liked,
+        ):
+            mock_lookup.return_value = {
+                "code": "RS-LIKE1",
+                "search_query": "shoes",
+                "image_description": None,
+                "category": "shoes",
+                "price_min": None,
+                "price_max": None,
+                "product_count": 3,
+                "product_ids": [1, 2, 3],
+                "sample_products": [],
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+            mock_liked.return_value = {2}
+
+            resp = await client.post("/api/chat", data={"text": "RS-LIKE1"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        section = data["sections"][0]
+        returned_ids = [r["product_id"] for r in section["results"]]
+        assert returned_ids == [1, 2]
+        assert section["results"][0]["match_label"] == "Exact match"
+        assert section["results"][1]["match_label"] == "Related"
 
     async def test_recall_unknown_code_returns_text(self, client):
         user = _make_client_user()
