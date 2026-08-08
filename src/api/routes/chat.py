@@ -41,6 +41,8 @@ _regex_nlu = RegexNLURouter()
 _lisa = LisaAgent()
 _conversation_context = ConversationContext()
 
+_WEB_SHOP_ID = 0
+
 _GREETING_TEXT = (
     "Hello! I'm Lisa ðŸ‘‹ Welcome to whatAppSeller.\n\n"
     "Tell me what you're looking for, or upload a photo, "
@@ -241,7 +243,7 @@ async def _persist_context_turn(
 ) -> None:
     """Mirror each turn into the durable conversation context (Redis + Postgres)."""
     try:
-        user_content = _lisa.user_turn_text(
+        user_content = LisaAgent._build_user_message(
             meta.get("user_text") or "",
             bool(meta.get("image_count")),
             meta.get("image_description") or "",
@@ -419,9 +421,14 @@ async def chat(
     ctx = await _conversation_context.load_context(db, redis, conversation.id)
     # Rebuild Lisa's fast Redis memory from Postgres if Redis was cleared
     # (context must survive restarts).
-    existing = await _lisa._load_history(redis, actor_key)
+    existing = await _lisa._load_history(
+        redis, conversation_id=actor_key, shop_id=_WEB_SHOP_ID
+    )
     if not existing and ctx["messages"]:
-        await _lisa.seed_history(redis, actor_key, ctx["messages"])
+        await _lisa.seed_history(
+            redis, conversation_id=actor_key, shop_id=_WEB_SHOP_ID,
+            messages=ctx["messages"],
+        )
 
     if not has_text and not has_images:
         return await _log_and_return(
@@ -442,14 +449,26 @@ async def chat(
         meta["image_description"] = image_desc
 
     # Lisa reads the full message + history and decides: chat or search.
-    turn = await _lisa.decide(redis, actor_key, text, has_images, image_note=image_desc)
+    turn = await _lisa.decide(
+        redis,
+        conversation_id=actor_key,
+        shop_id=_WEB_SHOP_ID,
+        user_text=text,
+        has_image=has_images,
+        image_note=image_desc,
+    )
     log_chat_turn(action=turn.action, search_text=turn.search_text, reply=turn.reply)
 
     # A photo ALWAYS means search â€” never reply without searching the image.
     if turn.action != "search" and not has_images:
         reply = {"reply_type": "text", "text": turn.reply}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), turn.reply, "gathering"
+            redis,
+            conversation_id=actor_key,
+            shop_id=_WEB_SHOP_ID,
+            user_text=LisaAgent._build_user_message(text, has_images, image_desc),
+            reply=turn.reply,
+            state={"stage": "gathering"},
         )
         return await _log_and_return(
             db, user, meta, reply, start, redis=redis, conversation=conversation
@@ -478,12 +497,22 @@ async def chat(
                 intents.append(SearchIntent(type="product_search", description=search_text))
 
     search_intents = [si for si in intents if si.type in ("visual_search", "product_search")]
+    # The search must use the customer's own words as the query, not a rebuilt
+    # string that may include details the customer never mentioned.
+    for si in search_intents:
+        if si.type == "product_search" and search_text:
+            si.query = search_text
     meta["intents"] = list(search_intents)
 
     if not search_intents:
         reply = {"reply_type": "text", "text": "What would you like me to look for? Describe it or send a photo."}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
+            redis,
+            conversation_id=actor_key,
+            shop_id=_WEB_SHOP_ID,
+            user_text=LisaAgent._build_user_message(text, has_images, image_desc),
+            reply=reply["text"],
+            state={"stage": "gathering"},
         )
         return await _log_and_return(
             db, user, meta, reply, start, redis=redis, conversation=conversation
@@ -499,7 +528,12 @@ async def chat(
         no_match_text = await compose_no_match_reply(turn.search_text or text)
         reply = {"reply_type": "text", "text": no_match_text}
         await _lisa.record_turn(
-            redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
+            redis,
+            conversation_id=actor_key,
+            shop_id=_WEB_SHOP_ID,
+            user_text=LisaAgent._build_user_message(text, has_images, image_desc),
+            reply=reply["text"],
+            state={"stage": "gathering"},
         )
         return await _log_and_return(
             db, user, meta, reply, start, redis=redis, conversation=conversation
@@ -570,7 +604,12 @@ async def chat(
     follow_up = _build_follow_up(text_topic, text_family, meta["image_family"])
 
     # Lisa writes the natural summary of what was found
-    lisa_text = await _lisa.present_results(redis, actor_key, _build_top_summary(sections))
+    lisa_text = await _lisa.present_results(
+        redis,
+        conversation_id=actor_key,
+        shop_id=_WEB_SHOP_ID,
+        top_results=_build_top_summary(sections),
+    )
 
     # Lisa's opening message acknowledging the image
     lisa_opening = ""
@@ -622,7 +661,12 @@ async def chat(
         messages.append({"type": "text", "text": follow_up["prompt"]})
 
     await _lisa.record_turn(
-        redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), final_text, "post_results"
+        redis,
+        conversation_id=actor_key,
+        shop_id=_WEB_SHOP_ID,
+        user_text=LisaAgent._build_user_message(text, has_images, image_desc),
+        reply=final_text,
+        state={"stage": "post_results"},
     )
     return await _log_and_return(
         db, user, meta, reply, start, redis=redis, conversation=conversation

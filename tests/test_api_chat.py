@@ -227,6 +227,44 @@ class TestChat:
         assert "Sorry" in data["text"]
         mock_no_match.assert_awaited_once_with("xyz")
 
+    async def test_chat_uses_literal_words_as_search_query(self, client):
+        """The search query is the customer's own words, never an assumed
+        category. E.g. 'find me blackskys' must search 'black sky', not shoes."""
+        user = _make_client_user()
+        app.dependency_overrides[get_optional_current_user] = lambda: user
+
+        mock_redis = AsyncMock()
+        app.dependency_overrides[get_redis] = lambda: mock_redis
+
+        mock_db = AsyncMock()
+        app.dependency_overrides[get_db] = lambda: mock_db
+
+        recovered = SearchIntent(type="product_search", description="black sky")
+        with (
+            patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
+            patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
+            patch("src.api.routes.chat.extract_nlu", new_callable=AsyncMock) as mock_nlu,
+            patch(
+                "src.api.routes.chat._regex_nlu.build_product_search_intent",
+                return_value=recovered,
+            ),
+            patch(
+                "src.api.routes.chat.compose_no_match_reply",
+                new_callable=AsyncMock,
+                return_value="no match",
+            ),
+        ):
+            mock_decide.return_value = AgentTurn(action="search", search_text="black sky")
+            mock_nlu.return_value = NLUResult(intent="chat", search_intents=[SearchIntent(type="chat")])
+            mock_exec.return_value = []
+
+            resp = await client.post("/api/chat", data={"text": "find me blackskys"})
+
+        assert resp.status_code == 200
+        intents = mock_exec.call_args.args[0]
+        product = next(si for si in intents if si.type == "product_search")
+        assert product.query == "black sky"
+
     async def test_chat_requires_auth(self, client):
         resp = await client.post("/api/chat", data={"text": "hello"})
         assert resp.status_code == 200

@@ -148,7 +148,28 @@ class TestPresentResults:
     async def test_present_falls_back_empty_on_llm_failure(self, agent, mock_redis):
         with patch.object(agent, "_call_ollama", new_callable=AsyncMock) as mock_llm:
             mock_llm.return_value = ""
-            assert await agent.present_results(mock_redis, 1, [{"name": "X", "price": 1}]) == ""
+            text = await agent.present_results(mock_redis, 1, [{"name": "X", "price": 1}])
+        assert text  # deterministic fallback keeps the assistant talking
+        assert "X" in text
+
+    async def test_present_includes_history(self, agent, mock_redis):
+        mock_redis.get.return_value = json.dumps([
+            {"role": "user", "content": "brown shoes"},
+            {"role": "assistant", "content": "On it!"},
+        ])
+        with patch.object(agent, "_call_ollama", new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = "Found them!"
+            text = await agent.present_results(mock_redis, 1, [{"name": "K", "price": 2}])
+        assert text == "Found them!"
+        assert "brown shoes" in mock_llm.await_args.args[0][1]["content"]
+
+    def test_fallback_present_joins_picks(self, agent):
+        summary = "- Shoe A — 100 UGX (Shop 1)\n- Shoe B — 200 UGX (Shop 2)"
+        text = LisaAgent._fallback_present(summary)
+        assert "Shoe A" in text and "Shoe B" in text
+
+    def test_fallback_present_empty(self, agent):
+        assert LisaAgent._fallback_present("") == ""
 
 
 class TestExtractReplyText:

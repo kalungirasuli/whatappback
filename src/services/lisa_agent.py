@@ -1,402 +1,1265 @@
-"""Lisa — the conversational sales assistant for whatAppSeller.
 
-Lisa reads the customer's whole message plus conversation history (kept in Redis),
-responds naturally (no canned scripts, no caps), and decides when there is enough
-context to trigger a real product search. When Ollama is unavailable or the reply
-isn't parseable, she falls back to lightweight heuristics so the shop never goes
-silent.
+"""
+Lisa — conversational sales agent for WhatAppSeller.
+
+Lisa is responsible for:
+- understanding the current customer message in conversation context;
+- deciding whether the application needs product retrieval;
+- producing a natural conversational response;
+- preserving conversational state.
+
+IMPORTANT:
+Lisa does not use keyword-based rules to determine intent.
+
+The LLM is the semantic decision maker.
+
+Python is responsible only for:
+- loading/storing conversation state;
+- calling Ollama;
+- validating structured output;
+- safely handling infrastructure failures.
+
+Conversation state is scoped by conversation_id and shop_id.
 """
 
 import json
 import logging
-import re
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 from src.core.config import settings
 
+
 logger = logging.getLogger(__name__)
 
 OLLAMA_CHAT_URL = f"{settings.ollama_url}/api/chat"
 
-LISA_SYSTEM_PROMPT = (
-    "You are Lisa, the friendly sales assistant for whatAppSeller — a WhatsApp marketplace "
-    "where people buy and sell in Any country but morjarly Uganda. You chat naturally and help buyers find products.\n\n"
-    "Personality:\n"
-    "- Warm, upbeat, quick-witted. Match the customer's tone (casual stays casual).\n"
-    "- Reply like a real WhatsApp chat, not a robot. medium, natural sentences. No canned option lists.\n"
-    "- Prices are in UGX (Ugandan shillings).\n\n"
-    "Conversation rules:\n"
-    "1. Read the customer's WHOLE message, conversation history, and current stage.\n"
-    "2. Be conversation-first. Do not search just because someone says 'need', 'want', or names a broad category.\n"
-    "3. For vague requests, stay in chat and ask 1-4 useful questions about type, budget, colour, brand, size, or occasion.\n"
-    "4. If the customer is answering your earlier questions and the accumulated context now identifies a product plus useful details, search without asking the same question again.\n"
-    "5. Search when the customer explicitly asks to find/search/show products, gives a specific request with useful details, or sends a photo.\n"
-    "6. A photo always means SEARCH using the image. After results, keep the customer engaged and invite refinement.\n\n"
-    'Respond with ONE JSON object and nothing else. Format:\n'
-    '{"action": "search" or "chat", "search_text": "short clean product phrase", "reply": "your message"}\n\n'
-    'Rules:\n'
-    '- "search": only for an explicit product-search request, a sufficiently specific request, or a photo. '
-    'search_text = the product phrase, e.g. "red nike running shoes". '
-    'reply = a short friendly line introducing the search (may be an empty string).\n'
-    '- "chat": for greetings, vague requests, and context gathering. Ask a useful question rather than searching.\n'
-)
 
-PRESENT_PROMPT = (
-    "You are Lisa. You searched the catalog and these are the ACTUAL top matches:\n"
-    "{results_summary}\n\n"
-    "Write a medium, natural WhatsApp message presenting these exact products and keep the customer engaged. "
-    "Use ONLY the product names and prices listed above — never invent brands, colours, "
-    "models or prices. Mention 1-2 top picks exactly as named. Invite them to tap "
-    "\"I'm interested\" on a product they like, and ask one natural question about what to refine next. "
-    "2-3 sentences, friendly, no bullet lists."
-)
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
 
-OPENING_PROMPT = (
-    "You are Lisa. The customer just sent a photo. You briefly see: \"{image_note}\". "
-    "They may have also written a message: \"{caption}\".\n\n"
-    "Write a SINGLE short, natural WhatsApp message (1 sentence) acknowledging what "
-    "you see and that you're searching for them. Warm, casual, no fluff. "
-    "Example: \"Nice sedan! Let me find similar cars for you.\" or "
-    "\"I can see the shoes — searching now!\" Reply with ONLY the message text."
-)
+LISA_SYSTEM_PROMPT = """
+You are Lisa, the conversational sales assistant for WhatAppSeller.
 
-_FALLBACK_GREETING = (
-    "Hey! I'm Lisa 👋 Welcome to whatAppSeller. Tell me what you're looking for or send me "
-    "a photo, and I'll find it for you from local sellers!"
-)
+WhatAppSeller is a marketplace where customers talk naturally with sellers
+through an AI sales assistant.
 
-_FALLBACK_HELP = (
-    "Here's how I can help, {name} 😊:\n\n"
-    "1. Tell me what you want — e.g. 'red shoes under 100k'\n"
-    "2. Or send a photo — I'll find similar products\n\n"
-    "I'll show matching products with images, prices and sellers."
-)
+Your job is to understand what the customer means and decide what should
+happen next.
 
-_FALLBACK_ASK = (
-    "Hey! What are you looking for today? Describe it (type, colour, budget) or send me "
-    "a photo and I'll find it for you."
-)
+You are NOT a keyword classifier.
 
-_FALLBACK_CLARIFY = (
-    "I can help with that. What kind are you after, and do you have a budget, colour, "
-    "brand, size, or occasion in mind?"
-)
+Do not use words such as "want", "need", "find", "show", "buy", "search",
+"phone", "shoe", etc. as automatic triggers.
 
-_EXPLICIT_SEARCH_RE = re.compile(
-    r"\b(search|search for|find|find me|show me|show us|look for|looking for|"
-    r"where can i get|do you have|send me|give me|locate|browse)\b",
-    re.IGNORECASE,
-)
-_PRODUCT_TERM_RE = re.compile(
-    r"\b(car|cars|vehicle|phone|phones|laptop|shoe|shoes|sneaker|shirt|dress|"
-    r"trouser|trousers|clothes|furniture|bag|bags|watch|computer|bike|motorcycle)\b",
-    re.IGNORECASE,
-)
-_DETAIL_RE = re.compile(
-    r"\b(red|blue|black|white|green|nike|adidas|samsung|iphone|under|below|above|"
-    r"over|budget|cheap|expensive|size|small|medium|large|new|used|automatic|manual|"
-    r"occasion|work|school|wedding|men|women|male|female|million|k|ugx|shilling)\b",
-    re.IGNORECASE,
-)
-_SEARCH_DETAIL_RE = re.compile(
-    r"\b(under|below|above|over|budget|size|k|ugx|million|cheap|expensive)\b|\d",
-    re.IGNORECASE,
-)
-_GREETING_RE = re.compile(r"\b(hello|hi|hey|yo|sup|how are you|good (morning|afternoon|evening))\b", re.IGNORECASE)
-_HELP_RE = re.compile(r"\b(help|how to|what can i do|how do i|instructions|guide)\b", re.IGNORECASE)
+Interpret the customer's meaning using the current message and the
+conversation context.
 
-_HISTORY_KEY = "lisa:history:{user_id}"
-_STAGE_KEY = "lisa:stage:{user_id}"
-_HISTORY_LIMIT = 20
-_DEFAULT_STAGE = "greeting"
+==================================================
+CONVERSATIONAL MEMORY
+==================================================
+
+You receive the conversation history and possibly:
+
+- an earlier conversation summary;
+- durable customer memory;
+- shop/business context;
+- previous search context;
+- previous search results.
+
+Treat these as conversational memory.
+
+The customer may refer to something without repeating it.
+
+Examples:
+
+Customer:
+"I need black Nike shoes under 200k."
+
+Assistant:
+"Here are some options."
+
+Customer:
+"Show me cheaper ones."
+
+Understand that "ones" refers to the shoes and that the customer wants
+another product search using the existing context.
+
+Customer:
+"How much is the second one?"
+
+This is NOT a new product search. The customer is asking about a product
+already identified in the conversation.
+
+Customer:
+"Same but blue."
+
+This is a refinement of the existing product request and requires a search.
+
+Customer:
+"Okay, I like that."
+
+This is conversational acknowledgement and does not require a search.
+
+==================================================
+CURRENT INTENT
+==================================================
+
+Decide what the customer is trying to accomplish NOW.
+
+Possible actions:
+
+"search"
+"chat"
+
+Use "search" when fulfilling the customer's request requires retrieving
+products from the catalogue.
+
+Use "chat" when the request can be handled conversationally without product
+retrieval.
+
+Do not decide based only on the current sentence.
+
+==================================================
+SEARCH
+==================================================
+
+A search can be:
+
+- a completely new product request;
+- a refinement of an existing search;
+- a request for alternatives;
+- a request for similar products;
+- a request for another colour/size/model/brand;
+- a request for products matching an image;
+- a request to find something already discussed.
+
+When searching, construct search_text using ALL relevant information that
+has been established by the conversation.
+
+For example:
+
+Earlier:
+"I need a black 18-inch human hair wig."
+
+Current:
+"Show me cheaper ones."
+
+The search_text should preserve the established product context while
+changing the relevant constraint.
+
+Do not throw away information simply because the customer did not repeat it.
+
+==================================================
+DO NOT SEARCH
+==================================================
+
+Do not search merely because a product was mentioned.
+
+Examples:
+
+"What is the price of the phone?"
+
+"Is this phone new?"
+
+"Can I pay by Mobile Money?"
+
+"How long does delivery take?"
+
+These can be handled conversationally if no retrieval is required.
+
+Likewise:
+
+"thanks"
+"okay"
+"nice"
+"yes"
+"that works"
+
+are conversational unless the surrounding context clearly indicates that
+the customer is requesting another action.
+
+==================================================
+IMPLICIT REFERENCES
+==================================================
+
+Resolve references from conversation context.
+
+Examples:
+
+- "it"
+- "that"
+- "this one"
+- "the first one"
+- "the second one"
+- "those"
+- "same one"
+- "another"
+- "more like that"
+- "cheaper"
+- "bigger"
+- "smaller"
+- "another colour"
+
+If the reference is clear, use it.
+
+If it is ambiguous, do not invent information.
+
+==================================================
+MULTIPLE REQUESTS
+==================================================
+
+A message may contain multiple actions.
+
+Example:
+
+"I like the first phone. How much is it, and show me similar ones."
+
+Interpret the message semantically.
+
+If product retrieval is required, action should be "search".
+
+The response should still naturally address the customer's question rather
+than blindly triggering a search.
+
+==================================================
+IMAGE
+==================================================
+
+An image does not automatically mean search.
+
+Understand the relationship between the image and the customer's text.
+
+For example:
+
+Image + "find something similar"
+=> search
+
+Image + "what colour is this?"
+=> chat
+
+Image + "thanks"
+=> chat
+
+If the image is relevant to product discovery, include that information in
+search_text.
+
+==================================================
+RESPONSE STYLE
+==================================================
+
+Reply like a real WhatsApp salesperson.
+
+Be:
+
+- warm;
+- natural;
+- concise;
+- conversational;
+- helpful.
+
+Do not use canned scripts.
+
+Do not unnecessarily ask questions when enough information already exists.
+
+Do not ask for information that the customer has already provided.
+
+If the customer has provided enough information to search, search.
+
+If important information is genuinely missing and a search cannot reasonably
+be performed, ask ONE useful question.
+
+==================================================
+SEARCH TEXT
+==================================================
+
+search_text must be a concise semantic representation of the customer's
+current product request.
+
+It should preserve relevant information from previous turns.
+
+Example:
+
+Conversation:
+"I need a Toyota Premio."
+"2018 or newer."
+"Automatic."
+"Under 40 million."
+
+Current:
+"Show me some."
+
+search_text:
+
+"Toyota Premio 2018 or newer automatic under 40 million UGX"
+
+Do not include irrelevant conversation.
+
+Do not invent missing attributes.
+
+==================================================
+NEVER ASSUME DETAILS
+==================================================
+
+search_text and reply must contain ONLY:
+
+- words the customer actually said, or
+- facts genuinely established earlier in this conversation.
+
+Never add a product category, brand, size, colour, model, quantity, or any
+detail that the customer did not mention and that is not already established
+in the conversation.
+
+Example:
+
+Customer:
+"find me blackskys"
+
+search_text MUST be:
+
+"black sky"
+
+It MUST NOT be "black sky shoes". The word "shoes" was never mentioned or
+established, so it must never be added.
+
+Likewise, do not ask about size, colour, budget, or delivery before results
+are presented unless the customer raised it themselves.
+
+==================================================
+OUTPUT
+==================================================
+
+Return valid JSON only.
+
+Format:
+
+{
+    "action": "search" | "chat",
+
+    "search_text": "",
+
+    "reply": "",
+
+    "interpretation": "",
+
+    "references": [],
+
+    "confidence": 0.0
+}
+
+Definitions:
+
+action:
+The action required NOW.
+
+search_text:
+Only relevant when action="search".
+
+reply:
+The natural response to the customer.
+
+interpretation:
+A short semantic explanation for application observability.
+Do NOT expose hidden chain-of-thought.
+
+references:
+Important previous conversation entities resolved for this turn.
+
+confidence:
+A number between 0 and 1 representing confidence in the interpretation.
+
+Do not add fields.
+
+Do not use markdown.
+
+Do not output reasoning or chain-of-thought.
+"""
 
 
+PRESENT_PROMPT = """
+You are Lisa, a conversational sales assistant.
+
+The catalogue search has already been performed.
+
+These are the ACTUAL products returned:
+
+{results_summary}
+
+Present these products naturally.
+
+Rules:
+
+- Use only product names and prices provided above.
+- Never invent brands, colours, models, availability or prices.
+- Mention one or two strong matches.
+- Do not repeat product names.
+- If the results already satisfy the customer's request, do not ask them to
+  refine the search.
+- Move the conversation naturally toward the next useful action.
+- Ask at most one short question when appropriate.
+- Keep the response to 2-3 natural WhatsApp sentences.
+- Do not use bullet lists.
+"""
+
+
+OPENING_PROMPT = """
+You are Lisa.
+
+The customer sent an image.
+
+Image description:
+"{image_note}"
+
+Customer message:
+"{caption}"
+
+Write one short natural WhatsApp message acknowledging the image and
+explaining what you will do next.
+
+Do not invent details that are not present in the image description.
+
+Return only the message text.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
 class AgentTurn:
-    def __init__(
-        self,
-        action: str,
-        reply: str = "",
-        search_text: str = "",
-        raw: str = "",
-    ) -> None:
-        self.action = action
-        self.reply = reply
-        self.search_text = search_text
-        self.raw = raw
+    action: str
+    reply: str = ""
+    search_text: str = ""
+    interpretation: str = ""
+    references: list[str] | None = None
+    confidence: float = 0.0
+    raw: str = ""
+
+    def __post_init__(self) -> None:
+        if self.references is None:
+            self.references = []
+
+
+# ---------------------------------------------------------------------------
+# Redis keys
+# ---------------------------------------------------------------------------
+
+_HISTORY_KEY = "lisa:history:{shop_id}:{conversation_id}"
+_STATE_KEY = "lisa:state:{shop_id}:{conversation_id}"
+
+_HISTORY_LIMIT = 30
 
 
 class LisaAgent:
+    """
+    Conversational sales agent.
+
+    IMPORTANT:
+    This class deliberately contains no regex-based intent detection.
+
+    The LLM determines whether the customer needs a search.
+    """
+
     def __init__(self) -> None:
         self.model = settings.ollama_model
         self.base_url = settings.ollama_url
 
-    # ---- public API ------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     async def decide(
         self,
         redis,
-        user_id: int | str,
+        conversation_id: str,
+        shop_id: int | str,
         user_text: str,
-        has_image: bool,
+        has_image: bool = False,
         image_note: str = "",
+        summary: str | None = None,
+        memory: dict[str, Any] | None = None,
+        shop_context: dict[str, Any] | None = None,
     ) -> AgentTurn:
-        history = await self._load_history(redis, user_id)
-        stage = await self._load_stage(redis, user_id)
-        user_turn = self.user_turn_text(user_text, has_image, image_note)
-        user_turn = f"[Conversation stage: {stage}]\n{user_turn}" if user_turn else f"[Conversation stage: {stage}]"
+        """
+        Interpret the current message using the conversation as memory.
 
-        messages = [{"role": "system", "content": LISA_SYSTEM_PROMPT}]
-        for h in history[-6:]:
-            messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
-        messages.append({"role": "user", "content": user_turn})
+        There is intentionally no Python semantic fallback.
+        """
 
-        raw = await self._call_ollama(messages)
-        turn = self._parse_decision(raw, user_text, has_image)
-
-        explicit_search = self._has_explicit_search(user_text)
-        context_product = self._history_has_product_term(history)
-        specific_request = self._has_specific_request(user_text) or (
-            stage in ("gathering", "post_results")
-            and context_product
-            and bool(_SEARCH_DETAIL_RE.search(user_text or ""))
+        history = await self._load_history(
+            redis,
+            conversation_id=conversation_id,
+            shop_id=shop_id,
         )
-        context_search_text = self._context_search_text(history, user_text)
-        if not has_image and turn.action == "search" and not (explicit_search or specific_request):
-            turn = AgentTurn(action="chat", reply=_FALLBACK_CLARIFY, raw=turn.raw)
-        elif not has_image and turn.action == "chat" and (explicit_search or specific_request):
-            turn = AgentTurn(
-                action="search",
-                reply=turn.reply,
-                search_text=(turn.search_text or context_search_text or user_text or "").strip(),
-                raw=turn.raw,
-            )
-        elif turn.action == "search" and not turn.search_text:
-            turn.search_text = context_search_text
 
-        await self._set_stage(redis, user_id, "ready" if turn.action == "search" else "gathering")
+        state = await self._load_state(
+            redis,
+            conversation_id=conversation_id,
+            shop_id=shop_id,
+        )
+
+        current_message = self._build_user_message(
+            user_text=user_text,
+            has_image=has_image,
+            image_note=image_note,
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": LISA_SYSTEM_PROMPT,
+            }
+        ]
+
+        context = self._build_context(
+            history=history,
+            state=state,
+            summary=summary,
+            memory=memory,
+            shop_context=shop_context,
+        )
+
+        if context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": context,
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": current_message,
+            }
+        )
+
+        raw = await self._call_ollama(
+            messages,
+            force_json=True,
+        )
+
+        if not raw:
+            # This is an infrastructure failure, NOT an intent decision.
+            #
+            # Do not call a regex classifier here.
+            #
+            # The caller can retry, queue the message, or return a generic
+            # temporary failure response.
+            return AgentTurn(
+                action="chat",
+                reply=(
+                    "I'm having a little trouble connecting right now. "
+                    "Please give me a moment and try again."
+                ),
+                confidence=0.0,
+            )
+
+        turn = self._parse_decision(raw)
+
+        if turn is None:
+            return AgentTurn(
+                action="chat",
+                reply=(
+                    "I didn't quite catch that. "
+                    "Could you say that another way?"
+                ),
+                confidence=0.0,
+                raw=raw,
+            )
+
         return turn
 
-    async def present_results(self, redis, user_id: int, top_results: list[dict]) -> str:
+    async def present_results(
+        self,
+        redis,
+        conversation_id: str,
+        shop_id: int | str,
+        top_results: list[dict],
+        summary: str | None = None,
+        memory: dict[str, Any] | None = None,
+        shop_context: dict[str, Any] | None = None,
+    ) -> str:
+        """
+        Generate a natural response from actual catalogue results.
+        """
+
         if not top_results:
             return ""
-        summary = "\n".join(
-            f"- {r.get('name') or 'item'} — {r.get('price')} UGX"
-            f" ({r.get('merchant_name') or 'a local seller'})"
-            for r in top_results[:5]
-        )
-        messages = [
-            {"role": "system", "content": LISA_SYSTEM_PROMPT},
-            {"role": "user", "content": PRESENT_PROMPT.format(results_summary=summary)},
-        ]
-        raw = await self._call_ollama(messages, force_json=False)
-        if not raw:
-            return ""
-        return self._extract_reply_text(raw)
 
-    async def compose_opening(self, image_note: str, caption: str = "") -> str:
-        """Write a natural 1-sentence message acknowledging the user's photo."""
-        if not image_note:
-            return "Let me see what you have there..."
+        results_summary = "\n".join(
+            (
+                f"- {result.get('name') or 'item'} — "
+                f"{result.get('price')} UGX "
+                f"({result.get('merchant_name') or 'a local seller'})"
+            )
+            for result in top_results[:5]
+        )
+
+        history = await self._load_history(
+            redis,
+            conversation_id=conversation_id,
+            shop_id=shop_id,
+        )
+
         messages = [
-            {"role": "system", "content": LISA_SYSTEM_PROMPT},
-            {"role": "user", "content": OPENING_PROMPT.format(
-                image_note=image_note, caption=caption or "[no caption]"
-            )},
+            {
+                "role": "system",
+                "content": LISA_SYSTEM_PROMPT,
+            }
         ]
-        raw = await self._call_ollama(messages, force_json=False)
+
+        context = self._build_context(
+            history=history,
+            state={},
+            summary=summary,
+            memory=memory,
+            shop_context=shop_context,
+        )
+
+        if context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": context,
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": PRESENT_PROMPT.format(
+                    results_summary=results_summary,
+                ),
+            }
+        )
+
+        raw = await self._call_ollama(
+            messages,
+            force_json=False,
+        )
+
         if not raw:
-            return "I can see your image - searching now!"
-        text = self._extract_reply_text(raw)
-        return text if text else "I can see your image - searching now!"
+            return self._fallback_present(top_results)
+
+        reply = self._extract_reply_text(raw)
+
+        return reply or self._fallback_present(top_results)
+
+    async def compose_opening(
+        self,
+        image_note: str,
+        caption: str = "",
+    ) -> str:
+        """
+        Generate a natural acknowledgement for an image.
+        """
+
+        if not image_note:
+            return "Let me take a look at that for you."
+
+        messages = [
+            {
+                "role": "system",
+                "content": LISA_SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": OPENING_PROMPT.format(
+                    image_note=image_note,
+                    caption=caption or "[no caption]",
+                ),
+            },
+        ]
+
+        raw = await self._call_ollama(
+            messages,
+            force_json=False,
+        )
+
+        if not raw:
+            return "I can see your image. Let me take a look."
+
+        return (
+            self._extract_reply_text(raw)
+            or "I can see your image. Let me take a look."
+        )
 
     async def record_turn(
         self,
         redis,
-        user_id: int | str,
+        conversation_id: str,
+        shop_id: int | str,
         user_text: str,
         reply: str,
-        stage: str | None = None,
+        state: dict[str, Any] | None = None,
     ) -> None:
+        """
+        Persist the conversation in Redis.
+
+        Redis is the fast working memory.
+        Durable conversation storage should still live in your database.
+        """
+
         try:
-            key = _HISTORY_KEY.format(user_id=user_id)
-            entries = await self._load_history(redis, user_id)
-            entries.append({"role": "user", "content": user_text or ""})
-            entries.append({"role": "assistant", "content": reply or ""})
-            if stage:
-                await self._set_stage(redis, user_id, stage)
-            await redis.set(key, json.dumps(entries[-_HISTORY_LIMIT:]))
-        except Exception:
-            logger.exception("Failed to record Lisa conversation turn")
+            key = self._history_key(
+                shop_id=shop_id,
+                conversation_id=conversation_id,
+            )
 
-    async def seed_history(self, redis, user_id: int | str, messages: list[dict]) -> None:
-        """Rebuild Lisa's fast Redis memory from durable conversation context."""
+            entries = await self._load_history(
+                redis,
+                conversation_id=conversation_id,
+                shop_id=shop_id,
+            )
+
+            if user_text:
+                entries.append(
+                    {
+                        "role": "user",
+                        "content": user_text,
+                    }
+                )
+
+            if reply:
+                entries.append(
+                    {
+                        "role": "assistant",
+                        "content": reply,
+                    }
+                )
+
+            await redis.set(
+                key,
+                json.dumps(
+                    entries[-_HISTORY_LIMIT:],
+                    ensure_ascii=False,
+                ),
+            )
+
+            if state is not None:
+                await self._set_state(
+                    redis,
+                    conversation_id=conversation_id,
+                    shop_id=shop_id,
+                    state=state,
+                )
+
+        except Exception:
+            logger.exception(
+                "Failed to record Lisa conversation turn"
+            )
+
+    async def seed_history(
+        self,
+        redis,
+        conversation_id: str,
+        shop_id: int | str,
+        messages: list[dict],
+    ) -> None:
+        """
+        Restore Redis working memory from durable conversation storage.
+        """
+
         try:
-            key = _HISTORY_KEY.format(user_id=user_id)
-            entries = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
-            if entries:
-                await redis.set(key, json.dumps(entries[-_HISTORY_LIMIT:]))
-                await self._set_stage(redis, user_id, "gathering")
+            entries = []
+
+            for message in messages:
+                role = message.get("role", "user")
+                content = str(message.get("content") or "").strip()
+
+                if content:
+                    entries.append(
+                        {
+                            "role": role,
+                            "content": content,
+                        }
+                    )
+
+            if not entries:
+                return
+
+            await redis.set(
+                self._history_key(
+                    shop_id=shop_id,
+                    conversation_id=conversation_id,
+                ),
+                json.dumps(
+                    entries[-_HISTORY_LIMIT:],
+                    ensure_ascii=False,
+                ),
+            )
+
         except Exception:
-            logger.exception("Failed to seed Lisa conversation history")
+            logger.exception(
+                "Failed to seed Lisa conversation history"
+            )
 
-    # ---- internals -------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Context construction
+    # ------------------------------------------------------------------
 
-    def user_turn_text(self, user_text: str, has_image: bool, image_note: str = "") -> str:
+    @staticmethod
+    def _build_context(
+        history: list[dict],
+        state: dict[str, Any],
+        summary: str | None,
+        memory: dict[str, Any] | None,
+        shop_context: dict[str, Any] | None,
+    ) -> str:
+        sections: list[str] = []
+
+        if history:
+            sections.append(
+                "CONVERSATION HISTORY:\n"
+                + json.dumps(
+                    history,
+                    ensure_ascii=False,
+                )
+            )
+
+        if summary:
+            sections.append(
+                "EARLIER CONVERSATION SUMMARY:\n"
+                + str(summary)
+            )
+
+        if memory:
+            sections.append(
+                "CUSTOMER MEMORY:\n"
+                + json.dumps(
+                    memory,
+                    ensure_ascii=False,
+                )
+            )
+
+        if state:
+            sections.append(
+                "CURRENT CONVERSATION STATE:\n"
+                + json.dumps(
+                    state,
+                    ensure_ascii=False,
+                )
+            )
+
+        if shop_context:
+            sections.append(
+                "SHOP CONTEXT:\n"
+                + json.dumps(
+                    shop_context,
+                    ensure_ascii=False,
+                )
+            )
+
+        if not sections:
+            return ""
+
+        return (
+            "Use the following information as conversational context. "
+            "Do not treat old conversation as the customer's current request "
+            "unless the current message refers to it.\n\n"
+            + "\n\n".join(sections)
+        )
+
+    @staticmethod
+    def _build_user_message(
+        user_text: str,
+        has_image: bool,
+        image_note: str,
+    ) -> str:
         parts: list[str] = []
-        if has_image:
-            parts.append("[Customer sent a photo]")
-            if image_note:
-                parts.append(image_note)
-        if user_text and user_text.strip():
-            parts.append(user_text.strip())
-        return "\n".join(parts) if parts else ""
 
-    async def _call_ollama(self, messages: list[dict], force_json: bool = True) -> str:
+        if has_image:
+            parts.append(
+                "CUSTOMER ATTACHED AN IMAGE."
+            )
+
+            if image_note:
+                parts.append(
+                    f"IMAGE DESCRIPTION:\n{image_note}"
+                )
+
+        if user_text and user_text.strip():
+            parts.append(
+                f"CURRENT CUSTOMER MESSAGE:\n{user_text.strip()}"
+            )
+
+        if not parts:
+            return "The customer sent an empty message."
+
+        return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Ollama
+    # ------------------------------------------------------------------
+
+    async def _call_ollama(
+        self,
+        messages: list[dict],
+        force_json: bool = True,
+    ) -> str:
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.5, "num_predict": 400},
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 600,
+            },
         }
+
         if force_json:
             payload["format"] = "json"
+
         try:
-            async with httpx.AsyncClient(timeout=settings.ollama_timeout) as client:
-                resp = await client.post(OLLAMA_CHAT_URL, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return str(data.get("message", {}).get("content", "")).strip()
+            async with httpx.AsyncClient(
+                timeout=settings.ollama_timeout,
+            ) as client:
+                response = await client.post(
+                    OLLAMA_CHAT_URL,
+                    json=payload,
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+                return str(
+                    data.get("message", {}).get("content", "")
+                ).strip()
+
         except httpx.ConnectError:
-            logger.warning("Ollama not reachable at %s — Lisa using fallback", self.base_url)
+            logger.warning(
+                "Ollama not reachable at %s",
+                self.base_url,
+            )
+
         except httpx.TimeoutException:
-            logger.warning("Ollama request timed out after %ss — Lisa using fallback", settings.ollama_timeout)
-        except Exception as e:
-            logger.error("Ollama chat request failed: %s", e)
+            logger.warning(
+                "Ollama request timed out after %ss",
+                settings.ollama_timeout,
+            )
+
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "Ollama returned HTTP %s: %s",
+                exc.response.status_code,
+            )
+
+        except Exception:
+            logger.exception(
+                "Ollama chat request failed"
+            )
+
         return ""
 
-    @staticmethod
-    def _extract_reply_text(raw: str) -> str:
-        """Best-effort extraction of Lisa's chat text from an LLM response.
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
 
-        Handles plain text, markdown-fenced JSON, and invalid JSON where the model
-        may have left a string field unescaped.
+    @staticmethod
+    def _parse_decision(
+        raw: str,
+    ) -> AgentTurn | None:
         """
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-        if not text:
-            return ""
+        Validate the model's semantic decision.
 
-        # Try strict JSON first.
+        This method MUST NOT infer intent.
+
+        It only accepts/rejects the model's decision.
+        """
+
+        if not raw:
+            return None
+
         try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                for key in ("reply", "response_text", "text"):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-                if isinstance(data.get("message"), dict):
-                    value = data["message"].get("content")
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-            return ""
+            data = json.loads(raw)
+
         except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+            logger.warning(
+                "Failed to parse Lisa decision: %s",
+                raw[:500],
+            )
+            return None
 
-        # Fallback: pull the first field value out of a broken JSON object.
-        match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-        if match:
-            return match.group(1).replace('\\"', '"').replace("\\n", "\n").strip()
-        for key in ("response_text", "text", "message"):
-            match = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
-            if match:
-                return match.group(1).replace('\\"', '"').replace("\\n", "\n").strip()
+        if not isinstance(data, dict):
+            return None
 
-        # Last resort: strip surrounding braces/quotes.
-        return text.strip('{}"').strip()
+        action = str(
+            data.get("action") or ""
+        ).strip().lower()
 
-    def _parse_decision(self, raw: str, user_text: str, has_image: bool) -> AgentTurn:
-        if raw:
-            try:
-                data = json.loads(raw)
-                action = str(data.get("action") or "").strip().lower()
-                if action in ("search", "chat"):
-                    reply = str(data.get("reply") or "")
-                    search_text = str(data.get("search_text") or "").strip()
-                    if action == "search" and not has_image and not search_text:
-                        search_text = (user_text or "").strip()
-                    if action == "chat" and not reply:
-                        reply = _FALLBACK_ASK
-                    return AgentTurn(action=action, reply=reply, search_text=search_text, raw=raw)
-            except (json.JSONDecodeError, ValueError, TypeError):
-                logger.warning("Failed to parse Lisa decision: %s", raw[:200])
+        if action not in {"search", "chat"}:
+            logger.warning(
+                "Lisa returned invalid action: %s",
+                action,
+            )
+            return None
 
-        return self._fallback_decision(user_text, has_image)
+        search_text = str(
+            data.get("search_text") or ""
+        ).strip()
 
-    @staticmethod
-    def _has_explicit_search(user_text: str) -> bool:
-        return bool(_EXPLICIT_SEARCH_RE.search(user_text or "") and _PRODUCT_TERM_RE.search(user_text or ""))
+        reply = str(
+            data.get("reply") or ""
+        ).strip()
 
-    @staticmethod
-    def _has_specific_request(user_text: str) -> bool:
-        text = user_text or ""
-        return bool(_PRODUCT_TERM_RE.search(text) and _DETAIL_RE.search(text))
+        interpretation = str(
+            data.get("interpretation") or ""
+        ).strip()
 
-    @staticmethod
-    def _history_has_product_term(history: list[dict]) -> bool:
-        return any(
-            _PRODUCT_TERM_RE.search(str(entry.get("content") or ""))
-            for entry in history
-            if entry.get("role") == "user"
+        references = data.get("references")
+
+        if not isinstance(references, list):
+            references = []
+
+        references = [
+            str(value)
+            for value in references
+            if value
+        ]
+
+        try:
+            confidence = float(
+                data.get("confidence", 0.0)
+            )
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        confidence = max(
+            0.0,
+            min(1.0, confidence),
+        )
+
+        # Do not manufacture search_text here.
+        #
+        # If the model says "search" but does not provide a query,
+        # that is an invalid/incomplete model decision.
+        #
+        # The application should not silently replace it with the latest
+        # user sentence because doing so destroys conversational context.
+        if action == "search" and not search_text:
+            logger.warning(
+                "Lisa requested search without search_text"
+            )
+            return None
+
+        return AgentTurn(
+            action=action,
+            reply=reply,
+            search_text=search_text,
+            interpretation=interpretation,
+            references=references,
+            confidence=confidence,
+            raw=raw,
         )
 
     @staticmethod
-    def _context_search_text(history: list[dict], user_text: str) -> str:
-        parts = [
-            str(entry.get("content") or "").strip()
-            for entry in history[-8:]
-            if entry.get("role") == "user" and str(entry.get("content") or "").strip()
-        ]
-        if user_text and user_text.strip():
-            parts.append(user_text.strip())
-        return " ".join(parts)
+    def _extract_reply_text(raw: str) -> str:
+        """
+        Extract conversational text from an LLM response.
 
-    def _fallback_decision(self, user_text: str, has_image: bool) -> AgentTurn:
-        lower = (user_text or "").lower()
-        if _HELP_RE.search(lower):
-            return AgentTurn(action="chat", reply=_FALLBACK_HELP)
-        if _GREETING_RE.search(lower) and not self._has_explicit_search(lower):
-            return AgentTurn(action="chat", reply=_FALLBACK_GREETING)
-        if has_image or self._has_explicit_search(lower) or self._has_specific_request(lower):
-            return AgentTurn(action="search", search_text=(user_text or "").strip())
-        return AgentTurn(action="chat", reply=_FALLBACK_CLARIFY)
+        This is formatting/parsing only.
+        It does not determine intent.
+        """
 
-    async def _load_stage(self, redis, user_id: int | str) -> str:
+        if not raw:
+            return ""
+
+        text = raw.strip()
+
         try:
-            stage = await redis.get(_STAGE_KEY.format(user_id=user_id))
-            return stage or _DEFAULT_STAGE
-        except Exception:
-            return _DEFAULT_STAGE
+            data = json.loads(text)
 
-    async def _set_stage(self, redis, user_id: int | str, stage: str) -> None:
-        try:
-            await redis.set(_STAGE_KEY.format(user_id=user_id), stage)
-        except Exception:
-            logger.exception("Failed to save Lisa conversation stage")
+            if isinstance(data, dict):
+                for key in (
+                    "reply",
+                    "response_text",
+                    "text",
+                ):
+                    value = data.get(key)
 
-    async def _load_history(self, redis, user_id: int | str) -> list[dict]:
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+
+                message = data.get("message")
+
+                if isinstance(message, dict):
+                    content = message.get("content")
+
+                    if (
+                        isinstance(content, str)
+                        and content.strip()
+                    ):
+                        return content.strip()
+
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+        return text.strip()
+
+    # ------------------------------------------------------------------
+    # Safe result fallback
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fallback_present(
+        top_results: list[dict],
+    ) -> str:
+        """
+        Deterministic presentation fallback.
+
+        This is acceptable because it is NOT making an intent decision.
+
+        It simply reports actual catalogue results when the response
+        generation model is unavailable.
+        """
+
+        products = []
+
+        for result in top_results[:3]:
+            name = str(
+                result.get("name") or "item"
+            ).strip()
+
+            price = result.get("price")
+
+            if price is not None:
+                products.append(
+                    f"{name} — {price} UGX"
+                )
+            else:
+                products.append(name)
+
+        if not products:
+            return ""
+
+        if len(products) == 1:
+            return (
+                f"I found {products[0]} for you. "
+                "Would you like to know more about it?"
+            )
+
+        return (
+            "I found these options for you: "
+            + ", ".join(products)
+            + ". Let me know which one you like."
+        )
+
+    # ------------------------------------------------------------------
+    # Redis state
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _history_key(
+        shop_id: int | str,
+        conversation_id: str,
+    ) -> str:
+        return _HISTORY_KEY.format(
+            shop_id=shop_id,
+            conversation_id=conversation_id,
+        )
+
+    @staticmethod
+    def _state_key(
+        shop_id: int | str,
+        conversation_id: str,
+    ) -> str:
+        return _STATE_KEY.format(
+            shop_id=shop_id,
+            conversation_id=conversation_id,
+        )
+
+    async def _load_history(
+        self,
+        redis,
+        conversation_id: str,
+        shop_id: int | str,
+    ) -> list[dict]:
         try:
-            raw = await redis.get(_HISTORY_KEY.format(user_id=user_id))
+            raw = await redis.get(
+                self._history_key(
+                    shop_id=shop_id,
+                    conversation_id=conversation_id,
+                )
+            )
+
         except Exception:
-            logger.exception("Failed to read Lisa conversation history")
+            logger.exception(
+                "Failed to read Lisa conversation history"
+            )
             return []
+
         if not raw:
             return []
+
         try:
             entries = json.loads(raw)
-            return entries if isinstance(entries, list) else []
+
         except (json.JSONDecodeError, ValueError, TypeError):
+            logger.warning(
+                "Invalid Lisa conversation history in Redis"
+            )
             return []
+
+        return entries if isinstance(entries, list) else []
+
+    async def _load_state(
+        self,
+        redis,
+        conversation_id: str,
+        shop_id: int | str,
+    ) -> dict[str, Any]:
+        try:
+            raw = await redis.get(
+                self._state_key(
+                    shop_id=shop_id,
+                    conversation_id=conversation_id,
+                )
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to read Lisa conversation state"
+            )
+            return {}
+
+        if not raw:
+            return {}
+
+        try:
+            state = json.loads(raw)
+
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return {}
+
+        return state if isinstance(state, dict) else {}
+
+    async def _set_state(
+        self,
+        redis,
+        conversation_id: str,
+        shop_id: int | str,
+        state: dict[str, Any],
+    ) -> None:
+        try:
+            await redis.set(
+                self._state_key(
+                    shop_id=shop_id,
+                    conversation_id=conversation_id,
+                ),
+                json.dumps(
+                    state,
+                    ensure_ascii=False,
+                ),
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to save Lisa conversation state"
+            )
+

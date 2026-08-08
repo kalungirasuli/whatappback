@@ -436,14 +436,14 @@ async def execute_intent_searches(
                 results.append((desc, _within_min_score(search_results)))
 
         elif intent.type == "product_search":
-            search_text = _build_search_text(intent.entities, intent.description)
+            search_text = intent.query or _build_search_text(intent.entities, intent.description)
             search_results = await pipeline.search_by_text(
                 text=search_text,
                 query_entities=intent.entities,
                 buyer_location=buyer_location,
                 price_range=_price_range_from_entities(intent.entities),
             )
-            desc = intent.description or search_text
+            desc = intent.query or intent.description or search_text
             results.append((desc, _within_min_score(search_results)))
 
     return results
@@ -558,6 +558,11 @@ async def process_batch(batch_payload: dict) -> str:
 
     # Filter down to only searchable intents
     search_intents = [si for si in intents if si.type in ("visual_search", "product_search")]
+
+    # Search with the customer's own words, not a rebuilt entity string.
+    for si in search_intents:
+        if si.type == "product_search" and combined_text.strip():
+            si.query = combined_text.strip()
 
     if not search_intents:
         return await compose_no_match_reply(combined_text or None)

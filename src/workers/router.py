@@ -139,6 +139,12 @@ async def route_message(payload: dict) -> None:
                     if si.type in ("visual_search", "product_search")
                 ]
 
+                # The search must use the customer's own words as the query,
+                # not a rebuilt string with details the customer never mentioned.
+                for si in search_intents:
+                    if si.type == "product_search" and (text or "").strip():
+                        si.query = (text or "").strip()
+
                 if search_intents:
                     results = await execute_intent_searches(search_intents, image_bytes)
                     reply = await compose_multi_intent_reply(results)

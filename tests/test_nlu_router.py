@@ -9,7 +9,9 @@ from src.workers.nlu_router import (
     NO_MATCH_FALLBACK,
     _within_min_score,
     compose_no_match_reply,
+    execute_intent_searches,
 )
+from src.services.llm_nlu import SearchIntent
 
 
 class TestIntentClassification:
@@ -340,3 +342,43 @@ class TestComposeNoMatchReply:
             reply = await compose_no_match_reply("red shoes")
         assert reply == NO_MATCH_FALLBACK
         assert "Sorry" in reply
+
+
+class TestExecuteIntentSearches:
+    async def test_product_search_uses_literal_query_not_rebuilt_entities(self):
+        """The search must use the customer's own words even when the NLU
+        extracted (possibly hallucinated) entities like a shoe category."""
+        intent = SearchIntent(
+            type="product_search",
+            description="",
+            entities={"category": "shoes", "product_name": "blacksky"},
+            query="black sky",
+        )
+        result = SimpleNamespace(product_id=15, score=0.69, metadata={"product_name": "black sky"})
+
+        with patch(
+            "src.workers.search_pipeline.SearchPipeline.search_by_text",
+            new_callable=AsyncMock,
+            return_value=[result],
+        ) as mock_search:
+            outcomes = await execute_intent_searches([intent])
+
+        assert mock_search.await_args.kwargs["text"] == "black sky"
+        desc, results = outcomes[0]
+        assert desc == "black sky"
+        assert results[0].product_id == 15
+
+    async def test_product_search_without_query_falls_back_to_build(self):
+        """When no literal query is set, the entity-based build is still used."""
+        intent = SearchIntent(
+            type="product_search",
+            description="",
+            entities={"product_name": "black sky"},
+        )
+        with patch(
+            "src.workers.search_pipeline.SearchPipeline.search_by_text",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_search:
+            await execute_intent_searches([intent])
+        assert mock_search.await_args.kwargs["text"] == "black sky"
