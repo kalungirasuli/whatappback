@@ -1,5 +1,7 @@
 import asyncio
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.core.dependencies import async_session_factory, get_redis
 from src.domain.commands import is_merchant_command
 from src.services.redis_service import get_session, get_wizard_step
@@ -9,11 +11,29 @@ from src.services.postgres_service import (
     get_buyer_by_phone,
     get_merchant_by_phone,
 )
-from src.domain.enums import UserRole
+from src.domain.enums import MessageRole, UserRole
+from src.services.conversation_context import ConversationContext
 from src.workers.queue import register_handler, process_queue
 from src.workers.nlu_router import extract_nlu, execute_intent_searches, compose_multi_intent_reply, process_batch
 from src.services.whatsapp import send_text, download_media
 from src.llm_agent.agent import SalesAgent
+
+
+_context = ConversationContext()
+
+
+async def _room(
+    db: AsyncSession, from_number: str, role: MessageRole, merchant_id: int | None = None
+):
+    return await _context.ensure_conversation(db, from_number, role, merchant_id)
+
+
+async def _reply(
+    db: AsyncSession, redis, conversation_id: int, from_number: str, user_turn: str, reply: str
+) -> None:
+    await _context.append(db, redis, conversation_id, "user", user_turn)
+    await _context.append(db, redis, conversation_id, "assistant", reply)
+    await send_text(from_number, reply)
 
 
 async def route_message(payload: dict) -> None:
@@ -64,9 +84,15 @@ async def route_message(payload: dict) -> None:
             await handle_merchant_command(db, redis, merchant, text, payload)
             return
 
-        # Precedence rule [2]: buyer text/image → NLU with multi-intent support
+# Precedence rule [2]: buyer text/image → NLU with multi-intent support
         if not merchant and (text or image):
-            nlu_result = await extract_nlu(text or "", has_image=image is not None)
+            conversation = await _room(db, from_number, MessageRole.buyer)
+            room = await _context.load_context(db, redis, conversation.id)
+            user_turn = text or ("[image]" if image else "")
+
+            nlu_result = await extract_nlu(
+                text or "", has_image=image is not None, history=room["messages"]
+            )
 
             has_search_intent = any(
                 si.type in ("visual_search", "product_search")
@@ -77,8 +103,8 @@ async def route_message(payload: dict) -> None:
             has_help = any(si.type == "help" for si in nlu_result.search_intents)
 
             if has_greeting and not has_search_intent:
-                await send_text(
-                    from_number,
+                await _reply(
+                    db, redis, conversation.id, from_number, user_turn,
                     "Hello! Welcome to whatAppseller.\n\n"
                     "Send a photo or describe what you're looking for, "
                     "and I'll find matching products from local sellers!",
@@ -86,8 +112,8 @@ async def route_message(payload: dict) -> None:
                 return
 
             if has_help:
-                await send_text(
-                    from_number,
+                await _reply(
+                    db, redis, conversation.id, from_number, user_turn,
                     "Here's what I can do:\n\n"
                     "1. Send a photo of a product you want - I'll find similar items\n"
                     "2. Type what you're looking for - e.g. 'Looking for red shoes under 100000'\n"
@@ -116,20 +142,27 @@ async def route_message(payload: dict) -> None:
                 if search_intents:
                     results = await execute_intent_searches(search_intents, image_bytes)
                     reply = await compose_multi_intent_reply(results)
-                    await send_text(from_number, reply)
+                    await _reply(db, redis, conversation.id, from_number, user_turn, reply)
                     return
 
             # Fall through to LLM agent for general questions / chat
             agent = SalesAgent()
-            reply = await agent.compose_reply(nlu_result, from_number)
-            await send_text(from_number, reply)
+            reply = await agent.compose_reply(
+                nlu_result, from_number, conversation_history=room["messages"]
+            )
+            await _reply(db, redis, conversation.id, from_number, user_turn, reply)
             return
 
         # Precedence rule [3]: merchant without @command or free text → LLM help-desk
         if text:
+            conversation = await _room(db, from_number, MessageRole.merchant,
+                                       merchant.id if merchant else None)
+            room = await _context.load_context(db, redis, conversation.id)
             agent = SalesAgent()
-            reply = await agent.compose_merchant_reply(text, from_number)
-            await send_text(from_number, reply)
+            reply = await agent.compose_merchant_reply(
+                text, from_number, conversation_history=room["messages"]
+            )
+            await _reply(db, redis, conversation.id, from_number, text, reply)
 
 
 async def route_batch(payload: dict) -> None:

@@ -218,6 +218,69 @@ class TestEntityExtraction:
         assert "price_max" not in result.entities
 
 
+class TestEntityCarryForward:
+    """Entities from earlier user turns must survive follow-up messages."""
+
+    async def test_carries_color_and_category(self):
+        router = RegexNLURouter()
+        result = await router.extract(
+            "under 100k",
+            history=[{"role": "user", "content": "I want red sneakers"}],
+        )
+        assert result.entities.get("color") == "red"
+        assert result.entities.get("category") == "shoes"
+        assert result.entities.get("price_max") == 100000
+
+    async def test_builds_attributes_and_constraints(self):
+        router = RegexNLURouter()
+        result = await router.extract(
+            "under 100k",
+            history=[{"role": "user", "content": "I want red sneakers"}],
+        )
+        merged = result.entities
+        assert merged["attributes"]["color"] == "red"
+        assert merged["constraints"]["price_max"] == 100000
+
+    async def test_current_message_wins(self):
+        router = RegexNLURouter()
+        result = await router.extract(
+            "blue shoes",
+            history=[{"role": "user", "content": "I want red sneakers"}],
+        )
+        assert result.entities.get("color") == "blue"
+
+    async def test_most_recent_user_turn_wins(self):
+        router = RegexNLURouter()
+        result = await router.extract(
+            "under 200k",
+            history=[
+                {"role": "user", "content": "red sneakers"},
+                {"role": "assistant", "content": "Got it, red sneakers."},
+                {"role": "user", "content": "actually black"},
+            ],
+        )
+        assert result.entities.get("color") == "black"
+        assert result.entities.get("price_max") == 200000
+
+    async def test_ignores_assistant_turns(self):
+        router = RegexNLURouter()
+        result = await router.extract(
+            "under 100k",
+            history=[
+                {"role": "assistant", "content": "I want red sneakers"},
+                {"role": "user", "content": "I want a phone"},
+            ],
+        )
+        assert result.entities.get("color") is None
+        assert result.entities.get("category") == "electronics"
+
+    async def test_no_history_no_change(self):
+        router = RegexNLURouter()
+        result = await router.extract("red shoes")
+        assert "price_max" not in result.entities
+        assert result.entities.get("color") == "red"
+
+
 class TestNLUResult:
     async def test_nlu_result_dataclass(self):
         result = NLUResult(intent="greeting", entities={"key": "val"}, confidence=0.9)

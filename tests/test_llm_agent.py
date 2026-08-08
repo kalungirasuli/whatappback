@@ -531,6 +531,80 @@ class TestContextBuilderHistory:
 
 
 # ---------------------------------------------------------------------------
+# ContextBuilder – summary, memory, shop and history blocks
+# ---------------------------------------------------------------------------
+
+class TestContextBuilderContextBlocks:
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_includes_history(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        history = [{"role": "user", "content": "red shoes"}, {"role": "assistant", "content": "Found some."}]
+        ctx = await builder.build_buyer_context(nlu, "+256700000000", history=history)
+        assert "Recent conversation" in ctx
+        assert "Customer: red shoes" in ctx
+        assert "Assistant: Found some." in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_omits_history_when_empty(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        ctx = await builder.build_buyer_context(nlu, "+256700000000", history=[])
+        assert "Recent conversation" not in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_includes_summary(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        ctx = await builder.build_buyer_context(
+            nlu, "+256700000000", summary="Customer wants black shoes under 100k."
+        )
+        assert "Conversation summary: Customer wants black shoes under 100k." in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_includes_memory(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        ctx = await builder.build_buyer_context(
+            nlu, "+256700000000", memory={"name": "Sasha", "budget": "80 USD"}
+        )
+        assert "About this customer" in ctx
+        assert "- name: Sasha" in ctx
+        assert "- budget: 80 USD" in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_omits_memory_when_empty(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        ctx = await builder.build_buyer_context(nlu, "+256700000000", memory={})
+        assert "About this customer" not in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_buyer_context_includes_shop(self):
+        builder = ContextBuilder()
+        nlu = FakeNLU()
+        shop = {
+            "business_name": "Test Shop",
+            "category": "Clothing",
+            "products": [{"name": "Shirt", "price": 50000}],
+        }
+        ctx = await builder.build_buyer_context(nlu, "+256700000000", shop_context=shop)
+        assert "This shop" in ctx
+        assert "Business Name: Test Shop" in ctx
+        assert "Top products" in ctx
+        assert "Shirt — 50000 UGX" in ctx
+
+    @pytest.mark.asyncio
+    async def test_build_merchant_context_includes_history(self):
+        builder = ContextBuilder()
+        history = [{"role": "user", "content": "@stock 1 10"}, {"role": "assistant", "content": "Done."}]
+        ctx = await builder.build_merchant_context("@price 1 20", "+256700123456", history=history)
+        assert "Recent conversation" in ctx
+        assert "Merchant: @stock 1 10" in ctx
+        assert "Assistant: Done." in ctx
+
+
+# ---------------------------------------------------------------------------
 # Prompt constants
 # ---------------------------------------------------------------------------
 

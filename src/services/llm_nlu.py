@@ -64,7 +64,17 @@ For product_search, extract generic entities for ANY product or item:
 - location: location mentioned (e.g. Kampala)
 - normalized_query: a clean search phrase containing the important item and attributes
 
-Preserve unknown product names and attributes exactly when you cannot classify them. Do not invent missing values.
+Preserve unknown names and attributes exactly when you cannot classify them. Do not invent missing values.
+
+CONTEXT RULES (important):
+- You are given a "Recent conversation" transcript from the same chatroom. Use it as memory:
+  the customer may refer back to products, colours, prices or details they mentioned earlier
+  (e.g. "under 100k" keeps the product and colour from an earlier message).
+- For each intent, fill in entity fields that are implied by the recent conversation
+  (for example when the current message says "show me more like that", carry over the
+  product type, colour, and budget from earlier turns).
+- Only carry over values that are clearly supported by the conversation. Never invent
+  a product, colour or price that was not mentioned.
 
 Respond with valid JSON only, no other text. Output format:
 {
@@ -98,8 +108,21 @@ class LLMNLUResult:
 
 
 class LLMNLUService:
-    async def extract(self, text: str, has_image: bool = False) -> LLMNLUResult:
-        user_message = f"User message: {text}\nHas image: {has_image}"
+    async def extract(
+        self, text: str, has_image: bool = False, history: list[dict] | None = None
+    ) -> LLMNLUResult:
+        context_block = ""
+        if history:
+            turns = []
+            for msg in history[-8:]:
+                role = "customer" if msg.get("role") == "user" else "assistant"
+                content = str(msg.get("content") or "").strip()
+                if content:
+                    turns.append(f"{role}: {content}")
+            if turns:
+                context_block = "Recent conversation:\n" + "\n".join(turns) + "\n\n"
+
+        user_message = f"{context_block}User message: {text}\nHas image: {has_image}"
         payload = {
             "model": settings.ollama_model,
             "prompt": f"{NLU_SYSTEM_PROMPT}\n\n{user_message}",

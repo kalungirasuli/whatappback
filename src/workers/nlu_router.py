@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.config import settings
 from src.services.llm_nlu import LLMNLUService, SearchIntent
 from src.services.whatsapp import send_text, download_media
 from src.workers.search_pipeline import SearchPipeline
@@ -269,10 +270,14 @@ class RegexNLURouter:
 
         return entities
 
-    async def extract(self, message_text: str, has_image: bool = False) -> NLUResult:
+    async def extract(
+        self, message_text: str, has_image: bool = False, history: list[dict] | None = None
+    ) -> NLUResult:
         intents = self._classify_intent(message_text, has_image)
         primary = intents[0] if intents else SearchIntent(type="unknown")
         is_multi = len(intents) > 1
+        if history and primary.entities:
+            primary.entities = self._merge_history_entities(primary.entities, history)
         return NLUResult(
             intent=primary.type,
             entities=primary.entities,
@@ -280,6 +285,47 @@ class RegexNLURouter:
             is_multi_intent=is_multi,
             search_intents=intents,
         )
+
+    # Sticky entities that may be carried across turns from earlier user messages.
+    _STICKY_ENTITY_KEYS = (
+        "color", "category", "brand", "model", "size", "gender",
+        "material", "style", "price_min", "price_max", "location",
+    )
+
+    def _merge_history_entities(self, entities: dict, history: list[dict]) -> dict:
+        """Carry forward entities from earlier user turns the current message lacks.
+
+        E.g. "red shoes" → "under 100k" keeps {color: red, category: shoes} and
+        adds the new price bound. The most recent user message wins for a key.
+        """
+        merged = dict(entities)
+
+        for msg in reversed(history):
+            if msg.get("role") not in ("user", "buyer"):
+                continue
+            content = str(msg.get("content") or "")
+            if not content.strip():
+                continue
+            prior = self._extract_entities(content)
+            for raw_key in self._STICKY_ENTITY_KEYS:
+                value = prior.get(raw_key)
+                if value is not None and merged.get(raw_key) is None:
+                    merged[raw_key] = value
+
+        attributes = merged.get("attributes") or {}
+        for key in ("color", "gender", "size", "brand", "model", "material", "style"):
+            if merged.get(key) is not None:
+                attributes[key] = merged[key]
+        if attributes:
+            merged["attributes"] = attributes
+
+        constraints = merged.get("constraints") or {}
+        for key in ("price_min", "price_max"):
+            if merged.get(key) is not None:
+                constraints[key] = merged[key]
+        if constraints:
+            merged["constraints"] = constraints
+        return merged
 
     def build_product_search_intent(self, text: str) -> SearchIntent | None:
         """Build a product_search intent from raw text, or None if the text isn't a product request.
@@ -306,8 +352,12 @@ _llm_nlu = LLMNLUService()
 _regex_nlu = RegexNLURouter()
 
 
-async def extract_nlu(message_text: str, has_image: bool = False) -> NLUResult:
-    llm_result = await _llm_nlu.extract(message_text, has_image=has_image)
+async def extract_nlu(
+    message_text: str,
+    has_image: bool = False,
+    history: list[dict] | None = None,
+) -> NLUResult:
+    llm_result = await _llm_nlu.extract(message_text, has_image=has_image, history=history)
 
     if llm_result.intents:
         primary = llm_result.intents[0]
@@ -321,7 +371,10 @@ async def extract_nlu(message_text: str, has_image: bool = False) -> NLUResult:
         )
 
     logger.info("LLM NLU unavailable, falling back to regex NLU")
-    return await _regex_nlu.extract(message_text, has_image=has_image)
+    if not settings.nlu_fallback_to_regex:
+        logger.info("Regex NLU fallback disabled by config; returning unknown")
+        return NLUResult(intent="unknown")
+    return await _regex_nlu.extract(message_text, has_image=has_image, history=history)
 
 
 def _price_range_from_entities(entities: dict) -> tuple[float, float] | None:

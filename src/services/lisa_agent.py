@@ -229,6 +229,17 @@ class LisaAgent:
         except Exception:
             logger.exception("Failed to record Lisa conversation turn")
 
+    async def seed_history(self, redis, user_id: int | str, messages: list[dict]) -> None:
+        """Rebuild Lisa's fast Redis memory from durable conversation context."""
+        try:
+            key = _HISTORY_KEY.format(user_id=user_id)
+            entries = [{"role": m.get("role", "user"), "content": m.get("content", "")} for m in messages]
+            if entries:
+                await redis.set(key, json.dumps(entries[-_HISTORY_LIMIT:]))
+                await self._set_stage(redis, user_id, "gathering")
+        except Exception:
+            logger.exception("Failed to seed Lisa conversation history")
+
     # ---- internals -------------------------------------------------------
 
     def user_turn_text(self, user_text: str, has_image: bool, image_note: str = "") -> str:

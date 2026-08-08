@@ -1,4 +1,5 @@
 ﻿import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from src.domain.enums import UserRole
 from src.services.reranker import RerankedResult
 from src.services.llm_nlu import SearchIntent
 from src.services.lisa_agent import AgentTurn
+from src.workers.nlu_router import NLUResult
 
 
 def _make_client_user(user_id=1, phone="256700000000"):
@@ -46,6 +48,42 @@ def _mock_product(product_id=1):
 def clear_overrides():
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def mock_conversation_context():
+    """The chat route wires durable conversation context (Redis+Postgres);
+
+    unit tests here mock the service so they exercise chat.py only."""
+    from src.api.routes import chat as chat_module
+
+    with (
+        patch.object(
+            chat_module._conversation_context, "ensure_conversation", new_callable=AsyncMock
+        ) as mock_ensure,
+        patch.object(
+            chat_module._conversation_context, "load_context", new_callable=AsyncMock
+        ) as mock_load,
+        patch.object(
+            chat_module._conversation_context, "append", new_callable=AsyncMock
+        ) as mock_append,
+        patch.object(
+            chat_module, "extract_nlu", new_callable=AsyncMock
+        ) as mock_nlu,
+        patch.object(chat_module._lisa, "_load_history", new_callable=AsyncMock) as mock_story,
+        patch.object(chat_module._lisa, "seed_history", new_callable=AsyncMock) as mock_seed,
+    ):
+        mock_ensure.return_value = SimpleNamespace(id=1)
+        mock_load.return_value = {"messages": []}
+        mock_story.return_value = []
+        mock_nlu.return_value = NLUResult(intent="product_search")
+        yield {
+            "ensure": mock_ensure,
+            "load": mock_load,
+            "append": mock_append,
+            "seed": mock_seed,
+            "extract_nlu": mock_nlu,
+        }
 
 
 @pytest.fixture

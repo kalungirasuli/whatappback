@@ -145,11 +145,18 @@ class SalesAgent:
         buyer_phone: str,
         conversation_history: list[dict] = None,
         search_results: list = None,
+        shop_context: dict | None = None,
+        summary: str | None = None,
+        memory: dict | None = None,
     ) -> str:
         context = await self._context_builder.build_buyer_context(
             nlu_result=nlu_result,
             buyer_phone=buyer_phone,
             search_results=search_results,
+            history=conversation_history,
+            shop_context=shop_context,
+            summary=summary,
+            memory=memory,
         )
 
         messages = _format_buyer_message(nlu_result, context)
@@ -164,10 +171,12 @@ class SalesAgent:
         self,
         message_text: str,
         merchant_phone: str,
+        conversation_history: list[dict] = None,
     ) -> str:
         context = await self._context_builder.build_merchant_context(
             message_text=message_text,
             merchant_phone=merchant_phone,
+            history=conversation_history,
         )
 
         messages = _format_merchant_message(context)

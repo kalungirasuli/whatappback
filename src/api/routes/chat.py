@@ -7,10 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_db, get_redis
 from src.auth.dependencies import get_current_user, get_optional_current_user
-from src.domain.models import ChatInteraction
+from src.domain.enums import MessageRole
+from src.domain.models import ChatInteraction, Conversation, ConversationMessage
+from src.services.conversation_context import ConversationContext
 from src.workers.nlu_router import (
     execute_intent_searches,
     detect_product_category,
+    extract_nlu,
     RegexNLURouter,
 )
 from src.workers.search_pipeline import SearchPipeline
@@ -35,9 +38,10 @@ _result_code_service = ResultCodeService()
 _chat_log = ChatLogService()
 _regex_nlu = RegexNLURouter()
 _lisa = LisaAgent()
+_conversation_context = ConversationContext()
 
 _GREETING_TEXT = (
-    "Hello! I'm Lisa 👋 Welcome to whatAppSeller.\n\n"
+    "Hello! I'm Lisa ðŸ‘‹ Welcome to whatAppSeller.\n\n"
     "Tell me what you're looking for, or upload a photo, "
     "and I'll find matching products from local sellers!"
 )
@@ -112,7 +116,7 @@ def _build_follow_up(
     image_family: str | None,
 ) -> dict | None:
     """The customer-relations officer: if the caption asks for something different
-    from what the photo shows, never drop the request — ask for the missing detail."""
+    from what the photo shows, never drop the request â€” ask for the missing detail."""
     if not text_family or not image_family or text_family == image_family:
         return None
     topic = text_topic or text_family
@@ -121,7 +125,7 @@ def _build_follow_up(
         "topic": topic,
         "image_family": image_family,
         "prompt": (
-            f"You also mentioned you're looking for *{topic}* — I don't want you to miss out! "
+            f"You also mentioned you're looking for *{topic}* â€” I don't want you to miss out! "
             f"Please upload a photo of the {topic} you want, or describe its type, brand, colour "
             f"and budget (e.g. \"white Nike running shoes under 200k\") and I'll find the right match for you."
         ),
@@ -189,6 +193,8 @@ async def _log_and_return(
     meta: dict,
     reply: dict,
     start: float,
+    redis=None,
+    conversation: Conversation | None = None,
 ) -> dict:
     thread_messages = _build_thread_messages(meta, reply)
     meta["thread_messages"] = thread_messages
@@ -219,7 +225,34 @@ async def _log_and_return(
     except Exception:
         import logging
         logging.getLogger(__name__).exception("Failed to log chat output")
+
+    if conversation is not None:
+        await _persist_context_turn(db, redis, conversation, meta, reply)
     return reply
+
+
+async def _persist_context_turn(
+    db: AsyncSession,
+    redis,
+    conversation: Conversation,
+    meta: dict,
+    reply: dict,
+) -> None:
+    """Mirror each turn into the durable conversation context (Redis + Postgres)."""
+    try:
+        user_content = _lisa.user_turn_text(
+            meta.get("user_text") or "",
+            bool(meta.get("image_count")),
+            meta.get("image_description") or "",
+        )
+        if user_content:
+            await _conversation_context.append(db, redis, conversation.id, "user", user_content)
+        assistant_content = (reply.get("response_text") or reply.get("text") or "").strip()
+        if assistant_content:
+            await _conversation_context.append(db, redis, conversation.id, "assistant", assistant_content)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Failed to persist conversation context turn")
 
 
 def _build_top_summary(sections: list[dict]) -> list[dict]:
@@ -373,13 +406,33 @@ async def chat(
         "image_family": None,
     }
 
+    # Durable chatroom context: one conversation per actor (user or guest).
+    conversation = await _conversation_context.ensure_conversation(
+        db,
+        actor_phone,
+        MessageRole.buyer,
+        customer_id=user.id if user else None,
+        backfill=True,
+    )
+    # Rebuild Lisa's fast Redis memory from Postgres if Redis was cleared
+    # (context must survive restarts).
+    existing = await _lisa._load_history(redis, actor_key)
+    if not existing:
+        ctx = await _conversation_context.load_context(db, redis, conversation.id)
+        if ctx["messages"]:
+            await _lisa.seed_history(redis, actor_key, ctx["messages"])
+
     if not has_text and not has_images:
-        return await _log_and_return(db, user, meta, {"reply_type": "text", "text": _GREETING_TEXT}, start)
+        return await _log_and_return(
+            db, user, meta, {"reply_type": "text", "text": _GREETING_TEXT}, start,
+            redis=redis, conversation=conversation,
+        )
 
     # Recall by RS- code
     if has_text and _RECALL_CODE_RE.match(text) and user:
         return await _log_and_return(
-            db, user, meta, await _handle_recall(text.strip(), db, user), start
+            db, user, meta, await _handle_recall(text.strip(), db, user), start,
+            redis=redis, conversation=conversation,
         )
 
     image_desc = None
@@ -391,13 +444,15 @@ async def chat(
     turn = await _lisa.decide(redis, actor_key, text, has_images, image_note=image_desc)
     log_chat_turn(action=turn.action, search_text=turn.search_text, reply=turn.reply)
 
-    # A photo ALWAYS means search — never reply without searching the image.
+    # A photo ALWAYS means search â€” never reply without searching the image.
     if turn.action != "search" and not has_images:
         reply = {"reply_type": "text", "text": turn.reply}
         await _lisa.record_turn(
             redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), turn.reply, "gathering"
         )
-        return await _log_and_return(db, user, meta, reply, start)
+        return await _log_and_return(
+            db, user, meta, reply, start, redis=redis, conversation=conversation
+        )
 
     # ---- search path ----------------------------------------------------
     intents: list[SearchIntent] = []
@@ -408,11 +463,19 @@ async def chat(
         ))
     if has_text:
         search_text = (turn.search_text or text).strip()
-        recovered = _regex_nlu.build_product_search_intent(search_text)
-        if recovered:
-            intents.append(recovered)
+        history = (await _conversation_context.load_context(db, redis, conversation.id)).get("messages", [])
+        nlu_result = await extract_nlu(search_text, has_image=False, history=history)
+        product_intents = [
+            si for si in nlu_result.search_intents if si.type == "product_search"
+        ]
+        if product_intents:
+            intents.extend(product_intents)
         else:
-            intents.append(SearchIntent(type="product_search", description=search_text))
+            recovered = _regex_nlu.build_product_search_intent(search_text)
+            if recovered:
+                intents.append(recovered)
+            else:
+                intents.append(SearchIntent(type="product_search", description=search_text))
 
     search_intents = [si for si in intents if si.type in ("visual_search", "product_search")]
     meta["intents"] = list(search_intents)
@@ -422,7 +485,9 @@ async def chat(
         await _lisa.record_turn(
             redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
         )
-        return await _log_and_return(db, user, meta, reply, start)
+        return await _log_and_return(
+            db, user, meta, reply, start, redis=redis, conversation=conversation
+        )
 
     results = await execute_intent_searches(
         search_intents,
@@ -435,7 +500,9 @@ async def chat(
         await _lisa.record_turn(
             redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
         )
-        return await _log_and_return(db, user, meta, reply, start)
+        return await _log_and_return(
+            db, user, meta, reply, start, redis=redis, conversation=conversation
+        )
 
     # Multi-object exact match search: each detected object searched independently
     if has_images:
@@ -556,7 +623,9 @@ async def chat(
     await _lisa.record_turn(
         redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), final_text, "post_results"
     )
-    return await _log_and_return(db, user, meta, reply, start)
+    return await _log_and_return(
+        db, user, meta, reply, start, redis=redis, conversation=conversation
+    )
 
 
 @router.get("/conversations")

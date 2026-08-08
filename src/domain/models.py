@@ -124,6 +124,9 @@ class Conversation(Base):
     merchant_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("merchants.id"), nullable=True
     )
+    customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    public_id: Mapped[str | None] = mapped_column(String(40), unique=True, nullable=True, index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_message_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.datetime.now(datetime.UTC), nullable=False
     )
@@ -132,6 +135,41 @@ class Conversation(Base):
     )
 
     merchant: Mapped[Merchant | None] = relationship("Merchant", back_populates="conversations")
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        "ConversationMessage", back_populates="conversation"
+    )
+
+
+class ConversationMessage(Base):
+    """One turn in a chatroom conversation (durable context source)."""
+
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("conversations.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.datetime.now(datetime.UTC), nullable=False
+    )
+
+    conversation: Mapped[Conversation] = relationship("Conversation", back_populates="messages")
+
+
+class CustomerMemory(Base):
+    """Long-term facts about a customer (name, preferred color/length, budget...)."""
+
+    __tablename__ = "customer_memory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_key: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    memory: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.datetime.now(datetime.UTC),
+        onupdate=datetime.datetime.now(datetime.UTC), nullable=False
+    )
 
 
 class ConversationLog(Base):
