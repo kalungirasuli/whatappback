@@ -529,9 +529,8 @@ class TestRecall:
         assert len(data["messages"]) == 1
         assert data["messages"][0]["type"] == "search_results"
 
-    async def test_recall_drops_unliked_related_but_keeps_closest(self, client):
-        """On recall, only the closest match and liked related products are
-        returned; unliked related items are dropped."""
+    async def test_recall_returns_only_closest_match(self, client):
+        """On recall, only the closest saved result is returned; related items are dropped."""
         user = _make_client_user()
         app.dependency_overrides[get_optional_current_user] = lambda: user
 
@@ -544,16 +543,10 @@ class TestRecall:
         mock_db = await self._recall_db([closest, liked_related, unliked_related])
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with (
-            patch(
-                "src.api.routes.chat._result_code_service.lookup",
-                new_callable=AsyncMock,
-            ) as mock_lookup,
-            patch(
-                "src.api.routes.chat._liked_product_ids",
-                new_callable=AsyncMock,
-            ) as mock_liked,
-        ):
+        with patch(
+            "src.api.routes.chat._result_code_service.lookup",
+            new_callable=AsyncMock,
+        ) as mock_lookup:
             mock_lookup.return_value = {
                 "code": "RS-LIKE1",
                 "search_query": "shoes",
@@ -566,7 +559,6 @@ class TestRecall:
                 "sample_products": [],
                 "created_at": "2026-01-01T00:00:00+00:00",
             }
-            mock_liked.return_value = {2}
 
             resp = await client.post("/api/chat", data={"text": "RS-LIKE1"})
 
@@ -574,9 +566,8 @@ class TestRecall:
         data = resp.json()
         section = data["sections"][0]
         returned_ids = [r["product_id"] for r in section["results"]]
-        assert returned_ids == [1, 2]
+        assert returned_ids == [1]
         assert section["results"][0]["match_label"] == "Exact match"
-        assert section["results"][1]["match_label"] == "Related"
 
     async def test_recall_unknown_code_returns_text(self, client):
         user = _make_client_user()

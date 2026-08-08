@@ -178,7 +178,7 @@ async def _handle_recall(code: str, db: AsyncSession, user) -> dict:
     liked_ids = await _liked_product_ids(db, user)
     if saved_ids:
         closest_id = saved_ids[0]
-        product_ids = [closest_id, *[pid for pid in saved_ids[1:] if pid in liked_ids]]
+        product_ids = [closest_id]
     else:
         product_ids = []
 
