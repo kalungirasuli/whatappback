@@ -14,6 +14,7 @@ from src.workers.nlu_router import (
     execute_intent_searches,
     detect_product_category,
     extract_nlu,
+    compose_no_match_reply,
     RegexNLURouter,
 )
 from src.workers.search_pipeline import SearchPipeline
@@ -414,13 +415,13 @@ async def chat(
         customer_id=user.id if user else None,
         backfill=True,
     )
+    # Single source of truth: one full conversation object for NLU + seeding.
+    ctx = await _conversation_context.load_context(db, redis, conversation.id)
     # Rebuild Lisa's fast Redis memory from Postgres if Redis was cleared
     # (context must survive restarts).
     existing = await _lisa._load_history(redis, actor_key)
-    if not existing:
-        ctx = await _conversation_context.load_context(db, redis, conversation.id)
-        if ctx["messages"]:
-            await _lisa.seed_history(redis, actor_key, ctx["messages"])
+    if not existing and ctx["messages"]:
+        await _lisa.seed_history(redis, actor_key, ctx["messages"])
 
     if not has_text and not has_images:
         return await _log_and_return(
@@ -463,8 +464,7 @@ async def chat(
         ))
     if has_text:
         search_text = (turn.search_text or text).strip()
-        history = (await _conversation_context.load_context(db, redis, conversation.id)).get("messages", [])
-        nlu_result = await extract_nlu(search_text, has_image=False, history=history)
+        nlu_result = await extract_nlu(search_text, has_image=False, context=ctx)
         product_intents = [
             si for si in nlu_result.search_intents if si.type == "product_search"
         ]
@@ -496,7 +496,8 @@ async def chat(
     )
 
     if not any(reranked for _, reranked in results):
-        reply = {"reply_type": "text", "text": "Sorry, I searched but couldn't find matching products right now. Try a different description or check back later!"}
+        no_match_text = await compose_no_match_reply(turn.search_text or text)
+        reply = {"reply_type": "text", "text": no_match_text}
         await _lisa.record_turn(
             redis, actor_key, _lisa.user_turn_text(text, has_images, image_desc), reply["text"], "gathering"
         )

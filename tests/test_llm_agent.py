@@ -559,7 +559,7 @@ class TestContextBuilderContextBlocks:
         ctx = await builder.build_buyer_context(
             nlu, "+256700000000", summary="Customer wants black shoes under 100k."
         )
-        assert "Conversation summary: Customer wants black shoes under 100k." in ctx
+        assert "Earlier conversation summary: Customer wants black shoes under 100k." in ctx
 
     @pytest.mark.asyncio
     async def test_build_buyer_context_includes_memory(self):

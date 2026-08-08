@@ -91,7 +91,7 @@ async def route_message(payload: dict) -> None:
             user_turn = text or ("[image]" if image else "")
 
             nlu_result = await extract_nlu(
-                text or "", has_image=image is not None, history=room["messages"]
+                text or "", has_image=image is not None, context=room
             )
 
             has_search_intent = any(
@@ -145,10 +145,17 @@ async def route_message(payload: dict) -> None:
                     await _reply(db, redis, conversation.id, from_number, user_turn, reply)
                     return
 
-            # Fall through to LLM agent for general questions / chat
+            # Fall through to LLM agent for general questions / chat.
+            # Single source of truth: the agent sees the exact same full
+            # conversation object that the NLU saw.
             agent = SalesAgent()
             reply = await agent.compose_reply(
-                nlu_result, from_number, conversation_history=room["messages"]
+                nlu_result,
+                from_number,
+                conversation_history=room["messages"],
+                summary=room.get("summary"),
+                memory=room.get("memory"),
+                shop_context=room.get("shop"),
             )
             await _reply(db, redis, conversation.id, from_number, user_turn, reply)
             return

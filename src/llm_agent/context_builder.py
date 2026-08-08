@@ -90,7 +90,7 @@ class ContextBuilder:
                 sections.append("Extracted entities:\n" + "\n".join(f"  - {l}" for l in entity_lines))
 
         if summary:
-            sections.append(f"Conversation summary: {summary}")
+            sections.append(f"Earlier conversation summary: {summary}")
 
         if memory:
             memory_lines = [f"  - {k}: {v}" for k, v in memory.items() if k and v is not None]
@@ -114,7 +114,7 @@ class ContextBuilder:
 
         if history:
             history_lines = []
-            for msg in history[-10:]:
+            for msg in history[-88:]:
                 role = "Customer" if msg.get("role") == "user" else "Assistant"
                 content = msg.get("content", "")
                 history_lines.append(f"{role}: {content}")

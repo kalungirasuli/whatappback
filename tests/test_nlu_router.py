@@ -1,6 +1,15 @@
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from src.workers.nlu_router import RegexNLURouter, NLUResult
+from src.workers.nlu_router import (
+    RegexNLURouter,
+    NLUResult,
+    MIN_MATCH_SCORE,
+    NO_MATCH_FALLBACK,
+    _within_min_score,
+    compose_no_match_reply,
+)
 
 
 class TestIntentClassification:
@@ -295,3 +304,39 @@ class TestNLUResult:
     async def test_nlu_result_default_confidence(self):
         result = NLUResult(intent="unknown")
         assert result.confidence == 0.0
+
+
+class TestMinScoreThreshold:
+    def test_drops_results_below_threshold(self):
+        items = [
+            SimpleNamespace(score=0.9),
+            SimpleNamespace(score=0.29),
+            SimpleNamespace(score=MIN_MATCH_SCORE),
+            SimpleNamespace(score=0.44),
+        ]
+        kept = _within_min_score(items)
+        assert len(kept) == 3
+        assert kept[0].score == 0.9
+        assert kept[1].score == MIN_MATCH_SCORE
+
+    def test_keeps_items_without_score(self):
+        items = [SimpleNamespace()]
+        assert _within_min_score(items) == items
+
+
+class TestComposeNoMatchReply:
+    async def test_returns_human_text_from_llm(self):
+        with patch(
+            "src.llm_agent.agent._call_llm", new_callable=AsyncMock,
+            return_value="  No luck with that one yet. Try a photo and we search again!  ",
+        ):
+            reply = await compose_no_match_reply("red shoes")
+        assert reply == "No luck with that one yet. Try a photo and we search again!"
+
+    async def test_falls_back_when_llm_unavailable(self):
+        with patch(
+            "src.llm_agent.agent._call_llm", new_callable=AsyncMock, return_value=None
+        ):
+            reply = await compose_no_match_reply("red shoes")
+        assert reply == NO_MATCH_FALLBACK
+        assert "Sorry" in reply

@@ -153,8 +153,16 @@ class TestProcessBatch:
         mock_extract.return_value.search_intents = []
 
         payload = {"from": "+256700000001", "images": [], "text": ""}
-        reply = await process_batch(payload)
+        with (
+            patch(
+                "src.workers.nlu_router.compose_no_match_reply",
+                new_callable=AsyncMock,
+                return_value="Sorry, I couldn't find matching products.",
+            ) as mock_no_match,
+        ):
+            reply = await process_batch(payload)
         assert reply == "Sorry, I couldn't find matching products."
+        mock_no_match.assert_awaited_once()
 
     @patch("src.workers.nlu_router.extract_nlu")
     @patch("src.workers.nlu_router.download_media")

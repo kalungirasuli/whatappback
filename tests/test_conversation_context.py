@@ -8,7 +8,8 @@ from src.domain.models import Conversation
 from src.services.conversation_context import (
     ConversationContext,
     REDIS_PREFIX,
-    SUMMARY_INTERVAL,
+    HISTORY_WINDOW,
+    COMPACT_EVERY,
     TTL_SECONDS,
 )
 
@@ -161,6 +162,7 @@ class TestAppend:
 
     async def test_appends_empty_content(self):
         redis = AsyncMock()
+        redis.llen.return_value = 0
         db = _mock_db()
         cc = ConversationContext()
         await cc.append(db, redis, 1, "user", None)
@@ -169,41 +171,50 @@ class TestAppend:
 
 
 class TestMaybeRefreshSummary:
-    async def test_triggers_at_interval(self):
+    async def test_triggers_compaction_on_window_overflow(self):
         db = _mock_db()
         redis = AsyncMock()
-        redis.llen.return_value = SUMMARY_INTERVAL
+        redis.llen.return_value = HISTORY_WINDOW + COMPACT_EVERY
         cc = ConversationContext()
-        with patch.object(cc, "_refresh_summary", new_callable=AsyncMock) as mock_refresh:
+        with patch.object(cc, "_compact_old_messages", new_callable=AsyncMock) as mock_compact:
             await cc.maybe_refresh_summary(db, redis, 1)
-        mock_refresh.assert_awaited_once_with(db, redis, 1)
+        mock_compact.assert_awaited_once_with(db, redis, 1, COMPACT_EVERY)
 
-    async def test_skips_when_not_multiple(self):
+    async def test_skips_when_within_window(self):
         db = _mock_db()
         redis = AsyncMock()
-        redis.llen.return_value = SUMMARY_INTERVAL - 1
+        redis.llen.return_value = HISTORY_WINDOW
         cc = ConversationContext()
-        with patch.object(cc, "_refresh_summary", new_callable=AsyncMock) as mock_refresh:
+        with patch.object(cc, "_compact_old_messages", new_callable=AsyncMock) as mock_compact:
             await cc.maybe_refresh_summary(db, redis, 1)
-        mock_refresh.assert_not_awaited()
+        mock_compact.assert_not_awaited()
+
+    async def test_skips_when_overflow_not_at_cadence(self):
+        db = _mock_db()
+        redis = AsyncMock()
+        redis.llen.return_value = HISTORY_WINDOW + 3
+        cc = ConversationContext()
+        with patch.object(cc, "_compact_old_messages", new_callable=AsyncMock) as mock_compact:
+            await cc.maybe_refresh_summary(db, redis, 1)
+        mock_compact.assert_not_awaited()
 
     async def test_skips_when_redis_unavailable(self):
         db = _mock_db()
         cc = ConversationContext()
-        with patch.object(cc, "_refresh_summary", new_callable=AsyncMock) as mock_refresh:
+        with patch.object(cc, "_compact_old_messages", new_callable=AsyncMock) as mock_compact:
             await cc.maybe_refresh_summary(db, None, 1)
-        mock_refresh.assert_not_awaited()
+        mock_compact.assert_not_awaited()
 
 
-class TestRefreshSummary:
-    async def test_updates_summary_and_memory(self):
+class TestCompactOldMessages:
+    async def test_folds_oldest_messages_and_trims(self):
         db = _mock_db()
-        conv = _conv(summary=None)
+        conv = _conv(summary="Wants sneakers.")
         db.get = AsyncMock(return_value=conv)
-        db.execute.return_value = _result(first=None, rows=[])
         redis = AsyncMock()
         redis.lrange.return_value = [
             json.dumps({"role": "user", "content": "I want red shoes under 100k"}),
+            json.dumps({"role": "assistant", "content": "Got it!"}),
         ]
         cc = ConversationContext()
         with (
@@ -211,28 +222,78 @@ class TestRefreshSummary:
                 cc,
                 "_call_summary_llm",
                 new_callable=AsyncMock,
-                return_value={"summary": "Wants red shoes.", "memory": {"budget": "100k"}},
+                return_value={"update": "Budget is 100k.", "memory": {"budget": "100k"}},
             ),
             patch.object(cc, "_save_memory", new_callable=AsyncMock) as mock_save,
         ):
-            await cc._refresh_summary(db, redis, 1)
-        assert conv.summary == "Wants red shoes."
+            await cc._compact_old_messages(db, redis, 1, 2)
+        assert conv.summary == "Wants sneakers.\nBudget is 100k."
         db.commit.assert_awaited()
         mock_save.assert_awaited_once_with(db, "256700000000", {"budget": "100k"})
+        redis.ltrim.assert_awaited_once_with(f"{REDIS_PREFIX}1", 2, -1)
+
+    async def test_first_summary_when_none_exists(self):
+        db = _mock_db()
+        conv = _conv(summary=None)
+        db.get = AsyncMock(return_value=conv)
+        redis = AsyncMock()
+        redis.lrange.return_value = [
+            json.dumps({"role": "user", "content": "Hello I need a phone"}),
+        ]
+        cc = ConversationContext()
+        with (
+            patch.object(
+                cc,
+                "_call_summary_llm",
+                new_callable=AsyncMock,
+                return_value={"summary": "Customer needs a phone.", "memory": {}},
+            ),
+            patch.object(cc, "_save_memory", new_callable=AsyncMock),
+        ):
+            await cc._compact_old_messages(db, redis, 1, 1)
+        assert conv.summary == "Customer needs a phone."
 
     async def test_keeps_summary_when_llm_fails(self):
         db = _mock_db()
         conv = _conv(summary="existing")
         db.get = AsyncMock(return_value=conv)
         redis = AsyncMock()
-        redis.lrange.return_value = []
+        redis.lrange.return_value = [
+            json.dumps({"role": "user", "content": "hello"}),
+        ]
         cc = ConversationContext()
         with (
             patch.object(cc, "_call_summary_llm", new_callable=AsyncMock, return_value=None),
             patch.object(cc, "_save_memory", new_callable=AsyncMock),
         ):
-            await cc._refresh_summary(db, redis, 1)
+            await cc._compact_old_messages(db, redis, 1, 1)
         assert conv.summary == "existing"
+        redis.ltrim.assert_not_awaited()
+
+    async def test_merge_summary_piece_appends_update(self):
+        cc = ConversationContext()
+        merged = cc._merge_summary_piece("First part.", {"update": "Second part."})
+        assert merged == "First part.\nSecond part."
+
+    async def test_merge_summary_piece_prefers_summary_for_first(self):
+        cc = ConversationContext()
+        merged = cc._merge_summary_piece("", {"summary": "Sole summary.", "update": "ignored"})
+        assert merged == "Sole summary."
+
+    async def test_merge_summary_piece_ignores_empty(self):
+        cc = ConversationContext()
+        assert cc._merge_summary_piece("existing", {}) == "existing"
+        assert cc._merge_summary_piece(None, {"update": ""}) == ""
+
+
+class TestLoadMessagesDb:
+    async def test_returns_most_recent_messages_oldest_first(self):
+        db = _mock_db()
+        cc = ConversationContext()
+        await cc._load_messages_db(db, 1, 20)
+        sql = str(db.execute.call_args[0][0])
+        assert "DESC" in sql
+        assert "LIMIT :param_1" in sql
 
 
 class TestBackfillFromChatLog:

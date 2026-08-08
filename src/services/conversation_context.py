@@ -1,11 +1,17 @@
 """Per-chatroom conversation context: durable memory for the sales agents.
 
 Tiers (matching the three-level context architecture):
-1. Recent messages  — PostgreSQL source of truth, Redis fast cache (conv:{id}).
-2. Conversation summary — regenerated periodically by Ollama on the row.
+1. Recent messages — PostgreSQL source of truth, Redis fast cache (conv:{id}).
+   The last HISTORY_WINDOW messages are kept in full.
+2. Rolling summary — when a conversation grows past the window, the oldest
+   messages are folded (compacted) into `conversation.summary` by Ollama, so
+   the summary always represents "everything older than the last 88 messages".
 3. Customer memory — long-term facts stored per customer_key.
 
 Plus shop/business context when a conversation is scoped to a merchant.
+
+The whole object (full recent messages + summary + memory + shop) is attached
+to NLU and reply-agent requests so both see the exact same conversation.
 """
 
 import datetime
@@ -32,25 +38,31 @@ from src.domain.models import (
 logger = logging.getLogger(__name__)
 
 REDIS_PREFIX = "conv:"
-REDIS_LIMIT = 40
-REDIS_MAX_LIMIT = 40
+HISTORY_WINDOW = 88
+REDIS_LIMIT = HISTORY_WINDOW
+REDIS_MAX_LIMIT = HISTORY_WINDOW
 TTL_SECONDS = 7 * 86400
-SUMMARY_INTERVAL = 10
-MAX_CONTEXT_MESSAGES = 20
+MAX_CONTEXT_MESSAGES = HISTORY_WINDOW
+COMPACT_EVERY = 10
 MAX_SUMMARY_MESSAGES = 60
 
 OLLAMA_GENERATE_URL = f"{settings.ollama_url}/api/generate"
 
 SUMMARY_PROMPT = (
     "You are the memory manager for a WhatsApp marketplace chatroom.\n"
-    "Given the recent conversation below, respond with ONE JSON object and nothing else:\n"
-    '{"summary": "...", "memory": {...}}\n\n'
-    "- summary: 2-3 sentence recap of the conversation so far (what the customer wants,\n"
-    "  budget, colours, sizes, delivery preference, current stage).\n"
+    "You maintain a rolling summary. You are given the CURRENT summary (which may\n"
+    "be empty) and NEW messages that have just moved out of the active window.\n"
+    "Respond with ONE JSON object and nothing else:\n"
+    '{"update": "...", "memory": {...}}\n\n'
+    "- update: the single new paragraph of up to 3 sentences to APPEND to the\n"
+    "  existing summary (what happened in the new messages: what the customer\n"
+    "  wants, budget, colours, sizes, delivery preference, current stage).\n"
+    '  Use field "summary" instead of "update" when the existing summary is empty.\n'
     "- memory: durable customer facts ONLY, each with a simple key, e.g.\n"
     '  {"name": "Sarah", "preferred_length": "20 inches", "preferred_color": "black",\n'
     '   "budget": "80 USD"}. Prefer existing keys, keep values short. Include nothing speculative.\n\n'
-    "Recent conversation:\n{transcript}"
+    "Existing summary:\n{existing_summary}\n\n"
+    "New messages (oldest first):\n{transcript}"
 )
 
 
@@ -146,14 +158,18 @@ class ConversationContext:
         redis,
         conversation_id: int,
     ) -> None:
-        count = 0
-        if redis is not None:
-            try:
-                count = await redis.llen(self._redis_key(conversation_id))
-            except Exception:
-                logger.warning("Redis llen failed for conv %s", conversation_id)
-        if count and count % SUMMARY_INTERVAL == 0:
-            await self._refresh_summary(db, redis, conversation_id)
+        """Compaction trigger: when the active window overflows, fold the oldest
+        messages (beyond the last HISTORY_WINDOW) into the rolling summary."""
+        if redis is None:
+            return
+        try:
+            count = await redis.llen(self._redis_key(conversation_id))
+        except Exception:
+            logger.warning("Redis llen failed for conv %s", conversation_id)
+            return
+        overflow = count - HISTORY_WINDOW
+        if overflow > 0 and overflow % COMPACT_EVERY == 0:
+            await self._compact_old_messages(db, redis, conversation_id, overflow)
 
     # ---- internals -------------------------------------------------------
 
@@ -183,10 +199,11 @@ class ConversationContext:
             result = await db.execute(
                 select(ConversationMessage)
                 .where(ConversationMessage.conversation_id == conversation_id)
-                .order_by(ConversationMessage.created_at.asc())
+                .order_by(ConversationMessage.created_at.desc())
                 .limit(max_messages)
             )
             rows = result.scalars().all()
+            rows.reverse()
             return [{"role": r.role, "content": r.content} for r in rows]
         except Exception as e:
             logger.warning("DB history load failed for conv %s: %s", conversation_id, e)
@@ -274,37 +291,61 @@ class ConversationContext:
             logger.warning("Shop context load failed for merchant %s: %s", merchant_id, e)
             return None
 
-    async def _refresh_summary(self, db: AsyncSession, redis, conversation_id: int) -> None:
+    async def _compact_old_messages(
+        self, db: AsyncSession, redis, conversation_id: int, overflow: int
+    ) -> None:
+        """Fold the oldest `overflow` messages of the active window into the
+        rolling summary, persist summary + memory, then drop them from Redis."""
         try:
-            messages = await self._load_messages_redis(redis, conversation_id, MAX_SUMMARY_MESSAGES)
-            if not messages:
-                messages = await self._load_messages_db(db, conversation_id, MAX_SUMMARY_MESSAGES)
+            key = self._redis_key(conversation_id)
+            raw = await redis.lrange(key, 0, overflow - 1)
+            messages = []
+            for item in raw:
+                try:
+                    messages.append(json.loads(item))
+                except (json.JSONDecodeError, TypeError):
+                    continue
             if not messages:
                 return
 
             transcript = "\n".join(
                 f"{m.get('role', 'user')}: {str(m.get('content', '')).strip()}"
-                for m in messages[-MAX_SUMMARY_MESSAGES:]
+                for m in messages
             )
-            parsed = await self._call_summary_llm(transcript)
+
+            conv = await db.get(Conversation, conversation_id)
+            existing = conv.summary if conv else None
+            parsed = await self._call_summary_llm(existing or "", transcript)
             if not parsed:
                 return
 
-            summary = parsed.get("summary")
-            conv = await db.get(Conversation, conversation_id)
-            if conv and summary:
-                conv.summary = summary
+            merged = self._merge_summary_piece(existing, parsed)
+            if conv and merged:
+                conv.summary = merged
                 await db.commit()
 
             customer_key = conv.phone_number if conv else None
             await self._save_memory(db, customer_key, parsed.get("memory") or {})
-        except Exception as e:
-            logger.warning("Summary refresh failed for conv %s: %s", conversation_id, e)
 
-    async def _call_summary_llm(self, transcript: str) -> dict | None:
+            await redis.ltrim(key, overflow, -1)
+        except Exception as e:
+            logger.warning("Summary compaction failed for conv %s: %s", conversation_id, e)
+
+    @staticmethod
+    def _merge_summary_piece(existing: str | None, parsed: dict) -> str:
+        piece = (parsed.get("summary") or parsed.get("update") or "").strip()
+        if not piece:
+            return existing or ""
+        if existing and existing.strip():
+            return f"{existing.strip()}\n{piece}"
+        return piece
+
+    async def _call_summary_llm(self, existing_summary: str, transcript: str) -> dict | None:
         payload = {
             "model": settings.ollama_model,
-            "prompt": SUMMARY_PROMPT.format(transcript=transcript),
+            "prompt": SUMMARY_PROMPT.format(
+                existing_summary=existing_summary or "", transcript=transcript
+            ),
             "format": "json",
             "stream": False,
             "options": {"temperature": 0.2, "num_predict": 512},

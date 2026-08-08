@@ -210,6 +210,11 @@ class TestChat:
         with (
             patch("src.api.routes.chat._lisa.decide", new_callable=AsyncMock) as mock_decide,
             patch("src.api.routes.chat.execute_intent_searches", new_callable=AsyncMock) as mock_exec,
+            patch(
+                "src.api.routes.chat.compose_no_match_reply",
+                new_callable=AsyncMock,
+                return_value="Sorry, I couldn't find anything for that yet. Try other words or send a photo!",
+            ) as mock_no_match,
         ):
             mock_decide.return_value = AgentTurn(action="search", search_text="xyz")
             mock_exec.return_value = [("xyz", [])]
@@ -220,6 +225,7 @@ class TestChat:
         data = resp.json()
         assert data["reply_type"] == "text"
         assert "Sorry" in data["text"]
+        mock_no_match.assert_awaited_once_with("xyz")
 
     async def test_chat_requires_auth(self, client):
         resp = await client.post("/api/chat", data={"text": "hello"})

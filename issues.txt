@@ -40,3 +40,20 @@ identify deffent objects in one image and crop the one by one and search indepen
 system understand the caption and image and if the both point to different direction the system should reutn response for each direction...
 
 we deep support user context collection. { user:" i have my clothers but dont know what shoes to put on with this type of clothes and need nice can to drive "} now this where the system intensively engages witht user ask them upload some images of the cloths ask their budget understand what the are aiming at, became designer same time a sellers man for the shoes and recommender for the car to buy or hire for the occasion after deep understanding... this should intensance interaction with system.
+
+
+
+
+
+
+
+
+
+
+
+
+
+PS C:\Users\CONRAD> for pagnation if match are above 1 use one image to and repsene the rest of the image and just show the merchant contacts for those that mades thought the close match... then put the rest as relate but just show only two image and two merchants. we should panganet close merchants when user clicks load more return the rest of close still in pagnetation not make aonther query call since matchs where return already.
+
+
+PS C:\Users\CONRAD> on user account creation lets add a location field, and also when returning data check use can query product from specific location they what and responde be filter accordingly.user profile is not updating .
