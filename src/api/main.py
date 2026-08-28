@@ -15,6 +15,7 @@ from src.api.routes.nlu import router as nlu_router
 from src.api.routes.chat import router as chat_router
 from src.api.routes.result_codes import router as result_codes_router
 from src.api.routes.analytics import router as analytics_router
+from src.api.routes.admin import router as admin_router
 
 setup_logging()
 
@@ -69,6 +70,7 @@ app.include_router(nlu_router)
 app.include_router(chat_router)
 app.include_router(result_codes_router)
 app.include_router(analytics_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

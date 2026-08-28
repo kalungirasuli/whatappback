@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "gemma2:2b"
     ollama_timeout: int = 15
+    # The NLU extractor produces strict JSON, which is the slowest Ollama
+    # workload (and the one that most often times out under serialization),
+    # so it gets a longer budget than conversational calls.
+    ollama_nlu_timeout: int = 30
     nlu_fallback_to_regex: bool = True
 
     llm_api_url: str = "http://localhost:11434"

@@ -11,8 +11,13 @@ from src.services.embedding import EmbeddingService
 from src.services.qdrant_service import QdrantService, SearchResult
 from src.services.reranker import Reranker, RerankedResult
 from src.services.detector import ObjectDetector
+from src.services.lexical_search import lexical_fallback
 
 logger = logging.getLogger(__name__)
+
+# Absolute relevance floor, kept in sync with nlu_router.MIN_MATCH_SCORE.
+# Results scoring below this are treated as noise rather than matches.
+_MIN_RELEVANCE_SCORE = 0.3
 
 _embedding = EmbeddingService()
 _qdrant = QdrantService()
@@ -180,7 +185,23 @@ class SearchPipeline:
             price_range=price_range,
         )
 
-        return apply_consistency_filter(reranked)
+        filtered = apply_consistency_filter(reranked)
+
+        # Dense search missed: try a lexical/fuzzy (name-first) fallback so an
+        # exact or near-exact product lookup that embeddings can't resolve
+        # (e.g. a misspelled brand name) is still found. The floor matches
+        # MIN_MATCH_SCORE in nlu_router (0.3), which is where results are
+        # finally discarded — trigger the fallback when nothing clears it.
+        strong = [r for r in filtered if r.score >= _MIN_RELEVANCE_SCORE]
+        if not strong:
+            try:
+                fallback = await lexical_fallback(text, limit=5)
+                if fallback:
+                    return fallback
+            except Exception:
+                logger.exception("Lexical fallback search failed")
+
+        return filtered
 
     async def format_reply(
         self,

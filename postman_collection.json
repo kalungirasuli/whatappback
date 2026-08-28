@@ -22,6 +22,36 @@
       "type": "string"
     },
     {
+      "key": "admin_base_url",
+      "value": "http://localhost:8001",
+      "type": "string"
+    },
+    {
+      "key": "admin_access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "admin_email",
+      "value": "admin@whatappseller.com",
+      "type": "string"
+    },
+    {
+      "key": "admin_password",
+      "value": "changeme123",
+      "type": "string"
+    },
+    {
+      "key": "merchant_id",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "buyer_id",
+      "value": "1",
+      "type": "string"
+    },
+    {
       "key": "client_phone",
       "value": "256700111222",
       "type": "string"
@@ -1534,6 +1564,633 @@
             "description": "Look up a customer's search result code.\n\nRequires merchant auth.\nReturns what the customer was searching for - no user identity.\n\nResponse includes:\n- code: The result code\n- search_query: What they typed\n- image_description: What was detected in their image\n- category, price range\n- product_count: How many matches\n- sample_products: Up to 3 example product names/prices\n- created_at: When the search happened"
           },
           "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Dashboard",
+      "description": "Admin-only dashboard endpoints (separate API on port 8001).\n\n## Quick Start\n1. `POST /admin/seed` \u00e2\u2020\u2019 creates the first admin (email: admin@whatappseller.com, password: changeme123)\n2. `POST /admin/login` \u00e2\u2020\u2019 returns an admin access token\n3. Use `{{admin_access_token}}` as Bearer token for all other admin endpoints\n\nCapabilities:\n- Analytics: overview, recent merchants, conversation volume\n- Merchants: list/detail, suspend, reactivate, ban\n- Buyers: list/detail, ban, unban\n- Listings: list/detail, deactivate, reactivate",
+      "item": [
+        {
+          "name": "Seed Admin",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{admin_base_url}}/admin/seed",
+              "host": [
+                "{{admin_base_url}}"
+              ],
+              "path": [
+                "admin",
+                "seed"
+              ]
+            },
+            "description": "Create the first admin account.\n\nDefault credentials:\n- email: admin@whatappseller.com\n- password: changeme123\n\nReturns 200 if admin already exists."
+          },
+          "response": []
+        },
+        {
+          "name": "Admin Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.access_token) {",
+                  "    pm.collectionVariables.set('admin_access_token', jsonData.access_token);",
+                  "    console.log('Admin login successful');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}"
+            },
+            "url": {
+              "raw": "{{admin_base_url}}/admin/login",
+              "host": [
+                "{{admin_base_url}}"
+              ],
+              "path": [
+                "admin",
+                "login"
+              ]
+            },
+            "description": "Authenticate as admin.\nReturns an access token valid for the configured session duration.\n\nReturns 401 for invalid credentials, 403 if account inactive."
+          },
+          "response": []
+        },
+        {
+          "name": "Admin Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{admin_base_url}}/health",
+              "host": [
+                "{{admin_base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Admin service health check. Returns service name 'admin-dashboard'."
+          },
+          "response": []
+        },
+        {
+          "name": "Get Current Admin",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{admin_access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{admin_base_url}}/admin/me",
+              "host": [
+                "{{admin_base_url}}"
+              ],
+              "path": [
+                "admin",
+                "me"
+              ]
+            },
+            "description": "Get the authenticated admin's profile (id, email, role, last_login_at).\nRequires admin access token."
+          },
+          "response": []
+        },
+        {
+          "name": "Analytics",
+          "description": "Admin analytics endpoints.\nAll require admin access token.",
+          "item": [
+            {
+              "name": "Analytics Overview",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "var jsonData = pm.response.json();",
+                      "if (jsonData.merchants) {",
+                      "    console.log('Merchants: ' + jsonData.merchants.total + ' (' + jsonData.merchants.active + ' active, ' + jsonData.merchants.suspended + ' suspended, ' + jsonData.merchants.banned + ' banned)');",
+                      "    console.log('Products: ' + jsonData.products.total + ' total, ' + jsonData.products.active + ' active');",
+                      "    console.log('Buyers: ' + jsonData.buyers.total + ' total, ' + jsonData.buyers.banned + ' banned');",
+                      "    console.log('Interest response rate: ' + jsonData.interests.response_rate);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/analytics/overview",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "analytics",
+                    "overview"
+                  ]
+                },
+                "description": "Platform-wide analytics overview.\n\nReturns:\n- merchants: total, active, suspended, banned\n- products: total, active\n- buyers: total, banned\n- interests: total, responded, response_rate\n- messages: total, inbound"
+              },
+              "response": []
+            },
+            {
+              "name": "Recent Merchants",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/analytics/recent-merchants?limit=10",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "analytics",
+                    "recent-merchants"
+                  ],
+                  "query": [
+                    {
+                      "key": "limit",
+                      "value": "10",
+                      "description": "Max merchants to return (default: 10)"
+                    }
+                  ]
+                },
+                "description": "Most recently registered merchants, newest first."
+              },
+              "response": []
+            },
+            {
+              "name": "Conversation Volume",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/analytics/conversation-volume?days=7",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "analytics",
+                    "conversation-volume"
+                  ],
+                  "query": [
+                    {
+                      "key": "days",
+                      "value": "7",
+                      "description": "Number of days to look back (default: 7)"
+                    }
+                  ]
+                },
+                "description": "Daily conversation message counts for the given period.\nReturns data array of {date, count}."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Merchant Management",
+          "description": "Admin merchant management.\nAll require admin access token.",
+          "item": [
+            {
+              "name": "List Merchants",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/merchants?status=&page=1&size=20",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "merchants"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "",
+                      "description": "Filter by status: pending, approved, suspended, banned (optional)"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default: 1)"
+                    },
+                    {
+                      "key": "size",
+                      "value": "20",
+                      "description": "Items per page (default: 20)"
+                    }
+                  ]
+                },
+                "description": "List merchants with optional status filter, newest first."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Merchant Detail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/merchants/{{merchant_id}}",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "merchants",
+                    "{{merchant_id}}"
+                  ]
+                },
+                "description": "Get merchant detail including their products.\nReturns 404 if merchant not found."
+              },
+              "response": []
+            },
+            {
+              "name": "Suspend Merchant",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/merchants/{{merchant_id}}/suspend",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "merchants",
+                    "{{merchant_id}}",
+                    "suspend"
+                  ]
+                },
+                "description": "Suspend a merchant account."
+              },
+              "response": []
+            },
+            {
+              "name": "Reactivate Merchant",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/merchants/{{merchant_id}}/reactivate",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "merchants",
+                    "{{merchant_id}}",
+                    "reactivate"
+                  ]
+                },
+                "description": "Reactivate a merchant account (sets status back to approved)."
+              },
+              "response": []
+            },
+            {
+              "name": "Ban Merchant",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/merchants/{{merchant_id}}/ban",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "merchants",
+                    "{{merchant_id}}",
+                    "ban"
+                  ]
+                },
+                "description": "Ban a merchant and deactivate all their active products."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Buyer Management",
+          "description": "Admin buyer management.\nAll require admin access token.",
+          "item": [
+            {
+              "name": "List Buyers",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/buyers?page=1&size=20",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "buyers"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default: 1)"
+                    },
+                    {
+                      "key": "size",
+                      "value": "20",
+                      "description": "Items per page (default: 20)"
+                    }
+                  ]
+                },
+                "description": "List buyers, newest first."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Buyer Detail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/buyers/{{buyer_id}}",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "buyers",
+                    "{{buyer_id}}"
+                  ]
+                },
+                "description": "Get buyer detail including ban status.\nReturns 404 if buyer not found."
+              },
+              "response": []
+            },
+            {
+              "name": "Ban Buyer",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/buyers/{{buyer_id}}/ban?reason=Abuse+reported",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "buyers",
+                    "{{buyer_id}}",
+                    "ban"
+                  ],
+                  "query": [
+                    {
+                      "key": "reason",
+                      "value": "Abuse reported",
+                      "description": "Ban reason (optional, default: 'Abuse reported')"
+                    }
+                  ]
+                },
+                "description": "Ban a buyer. Optionally provide a reason via query param."
+              },
+              "response": []
+            },
+            {
+              "name": "Unban Buyer",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/buyers/{{buyer_id}}/unban",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "buyers",
+                    "{{buyer_id}}",
+                    "unban"
+                  ]
+                },
+                "description": "Unban a buyer and clear the ban reason."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Listing Management",
+          "description": "Admin product listing management.\nAll require admin access token.",
+          "item": [
+            {
+              "name": "List Products",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/listings?status=&merchant_id=&page=1&size=20",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "listings"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "",
+                      "description": "Filter by status: pending, active, inactive (optional)"
+                    },
+                    {
+                      "key": "merchant_id",
+                      "value": "",
+                      "description": "Filter by merchant (optional)"
+                    },
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number (default: 1)"
+                    },
+                    {
+                      "key": "size",
+                      "value": "20",
+                      "description": "Items per page (default: 20)"
+                    }
+                  ]
+                },
+                "description": "List all product listings with optional status/merchant filters."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Listing Detail",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/listings/{{product_id}}",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "listings",
+                    "{{product_id}}"
+                  ]
+                },
+                "description": "Get product listing detail including images.\nReturns 404 if product not found."
+              },
+              "response": []
+            },
+            {
+              "name": "Deactivate Listing",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/listings/{{product_id}}/deactivate",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "listings",
+                    "{{product_id}}",
+                    "deactivate"
+                  ]
+                },
+                "description": "Deactivate a product listing (removes from active search results)."
+              },
+              "response": []
+            },
+            {
+              "name": "Reactivate Listing",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{admin_access_token}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{admin_base_url}}/admin/listings/{{product_id}}/reactivate",
+                  "host": [
+                    "{{admin_base_url}}"
+                  ],
+                  "path": [
+                    "admin",
+                    "listings",
+                    "{{product_id}}",
+                    "reactivate"
+                  ]
+                },
+                "description": "Reactivate a product listing (sets status back to active)."
+              },
+              "response": []
+            }
+          ]
         }
       ]
     },

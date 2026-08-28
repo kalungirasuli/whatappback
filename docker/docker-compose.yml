@@ -42,6 +42,11 @@ services:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
+    environment:
+      # Serve concurrent requests to a loaded model instead of serializing
+      # them, and keep the model warm to avoid per-request reload stalls.
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_KEEP_ALIVE: "10m"
     volumes:
       - ollama_data:/root/.ollama
     deploy:

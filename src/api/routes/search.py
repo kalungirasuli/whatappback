@@ -19,26 +19,112 @@ qdrant_service = QdrantService()
 SEARCH_HISTORY_PREFIX = "search_history:"
 
 
+def _normalize_cluster_key(product: Product | None) -> str:
+    if not product:
+        return "unknown"
+    name = (product.name or "").strip().lower()
+    brand = (product.brand or "").strip().lower()
+    category = (product.category or "").strip().lower()
+    return "|".join([name, brand, category])
+
+
+def _first_image(images: list) -> dict | None:
+    if not images:
+        return None
+    primary = next((img for img in images if getattr(img, "is_primary", False)), None)
+    if primary:
+        return {"url": primary.storage_url, "is_primary": True}
+    first = images[0]
+    return {"url": first.storage_url, "is_primary": getattr(first, "is_primary", False)}
+
+
 def _format_results(reranked_results, db_products: dict[int, Product]) -> list[dict]:
-    items = []
+    clusters: dict[str, dict] = {}
     for r in reranked_results:
         product = db_products.get(r.product_id)
-        images = []
-        merchant = None
+        bucket = _normalize_cluster_key(product)
+        cluster = clusters.setdefault(bucket, {
+            "items": [],
+            "top_score": 0.0,
+            "top_rank": 9999,
+        })
+        cluster["items"].append((r, product))
+        if r.score > cluster["top_score"] or (
+            r.score == cluster["top_score"] and r.rank < cluster["top_rank"]
+        ):
+            cluster["top_score"] = r.score
+            cluster["top_rank"] = r.rank
 
-        if product:
+    cluster_list: list[dict] = []
+    for cluster_data in clusters.values():
+        items = sorted(
+            cluster_data["items"],
+            key=lambda item: (-item[0].score, item[0].rank),
+        )
+        if not items:
+            continue
+
+        representative_rank, representative_product = items[0]
+        merchant_scores: dict[int, dict] = {}
+        merchant_clusters: list[dict] = []
+        for r, product in items:
+            if not product or not getattr(product, "merchant", None):
+                continue
             merchant = product.merchant
-            images = [
-                {"url": img.storage_url, "is_primary": img.is_primary}
-                for img in product.images
-            ]
+            if r.score < 0.40:
+                continue
+            merchant_id = getattr(merchant, "id", None)
+            if merchant_id is None:
+                continue
+            existing = merchant_scores.get(merchant_id)
+            if existing and existing["score"] >= r.score:
+                continue
+            merchant_scores[merchant_id] = {
+                "merchant_id": merchant_id,
+                "business_name": merchant.business_name,
+                "phone_number": merchant.phone_number,
+                "category": merchant.category,
+                "location_lat": merchant.location_lat,
+                "location_lng": merchant.location_lng,
+                "score": round(r.score, 4),
+                "product_id": r.product_id,
+                "match_label": r.match_label,
+            }
 
-        items.append({
-            "product_id": r.product_id,
-            "name": product.name if product else f"Product #{r.product_id}",
-            "price": product.price if product else 0,
-            "currency": product.currency if product else "UGX",
-            "category": product.category if product else "",
+        merchant_clusters = sorted(
+            merchant_scores.values(),
+            key=lambda mch: (-mch["score"], mch["business_name"] or ""),
+        )
+        merchant_count = len(merchant_clusters)
+        if merchant_count > 30:
+            merchant_clusters = merchant_clusters[:30]
+
+        representative_image = _first_image(representative_product.images if representative_product else [])
+        related_products = []
+        for other_bucket, other_cluster in clusters.items():
+            if other_cluster is cluster_data:
+                continue
+            other_items = sorted(
+                other_cluster["items"],
+                key=lambda item: (-item[0].score, item[0].rank),
+            )
+            if other_items:
+                other_r, other_product = other_items[0]
+                related_products.append({
+                    "product_id": other_r.product_id,
+                    "name": other_product.name if other_product else f"Product #{other_r.product_id}",
+                    "score": round(other_r.score, 4),
+                    "match_label": other_r.match_label,
+                })
+        related_products = sorted(related_products, key=lambda item: -item["score"])[:2]
+
+        merchant = representative_product.merchant if representative_product else None
+        cluster_list.append({
+            "product_id": representative_rank.product_id,
+            "name": representative_product.name if representative_product else f"Product #{representative_rank.product_id}",
+            "price": representative_product.price if representative_product else 0,
+            "currency": representative_product.currency if representative_product else "UGX",
+            "category": representative_product.category if representative_product else "",
             "merchant": {
                 "id": merchant.id,
                 "business_name": merchant.business_name,
@@ -47,12 +133,18 @@ def _format_results(reranked_results, db_products: dict[int, Product]) -> list[d
                 "location_lat": merchant.location_lat,
                 "location_lng": merchant.location_lng,
             } if merchant else None,
-            "score": round(r.score, 4),
-            "match_label": r.match_label,
-            "images": images,
+            "score": round(representative_rank.score, 4),
+            "match_label": representative_rank.match_label,
+            "images": [
+                representative_image
+            ] if representative_image else [],
+            "merchant_count": merchant_count,
+            "merchants": merchant_clusters,
+            "related_products": related_products,
         })
 
-    return items
+    cluster_list.sort(key=lambda item: (-item["score"], item["product_id"]))
+    return cluster_list
 
 
 async def _load_products(product_ids: list[int], db: AsyncSession) -> dict[int, Product]:

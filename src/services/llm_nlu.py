@@ -577,13 +577,15 @@ class LLMNLUService:
                 # Low temperature keeps the interpretation consistent while
                 # still allowing the model to reason semantically.
                 "temperature": 0.15,
-                "num_predict": 768,
+                # Intent/entity extraction rarely needs more than a few hundred
+                # tokens; capping the worst case bounds the request latency.
+                "num_predict": 256,
             },
         }
 
         try:
             async with httpx.AsyncClient(
-                timeout=settings.ollama_timeout
+                timeout=settings.ollama_nlu_timeout
             ) as client:
                 response = await client.post(
                     OLLAMA_GENERATE_URL,
@@ -604,8 +606,8 @@ class LLMNLUService:
 
         except httpx.TimeoutException:
             logger.warning(
-                "Ollama request timed out after %ss",
-                settings.ollama_timeout,
+                "Ollama NLU request timed out after %ss",
+                settings.ollama_nlu_timeout,
             )
             return LLMNLUResult()
 
