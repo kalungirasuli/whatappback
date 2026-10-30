@@ -63,13 +63,13 @@ class Settings(BaseSettings):
     dinov2_weight: float = 0.4
 
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma2:2b"
+    ollama_model: str = "gemma4:e2b"
     ollama_timeout: int = 15
     nlu_fallback_to_regex: bool = True
 
     llm_api_url: str = "http://localhost:11434"
     llm_api_key: str = "ollama"
-    llm_model: str = "gemma2:2b"
+    llm_model: str = "gemma4:e2b"
 
     log_level: str = "INFO"
 

@@ -8,7 +8,7 @@
 | Docker Desktop | Latest | Postgres, Redis, Qdrant, MinIO |
 | NVIDIA GPU | GTX 1660+ (6GB VRAM) | Model inference |
 | CUDA Toolkit | 12.1+ | GPU acceleration |
-| Ollama | Latest | Gemma2 NLU inference |
+| Ollama | Latest | Gemma 4 NLU inference |
 
 ---
 
@@ -48,16 +48,17 @@ C:\Users\CONRAD\AppData\Local\Programs\Ollama\ollama.exe
 # Or add to PATH via System Environment Variables
 ```
 
-### Pull Gemma2 Model
+### Pull Gemma 4 Model
 
 ```powershell
-& "C:\Users\CONRAD\AppData\Local\Programs\Ollama\ollama.exe" pull gemma2:2b
+& "C:\Users\CONRAD\AppData\Local\Programs\Ollama\ollama.exe" pull gemma4:e2b
 ```
 
 | Model | Size | VRAM Usage | Quality |
 |-------|------|------------|---------|
-| `gemma2:2b` | ~1.6 GB | ~2 GB | Good for NLU tasks |
-| `gemma2:9b` | ~5.5 GB | ~6 GB | Better but tight on 6GB VRAM |
+| `gemma4:e2b` | ~4.6 GB | ~5 GB | Good for NLU tasks |
+| `gemma4:e4b` | ~6.6 GB | ~7 GB | Better but exceeds 6GB VRAM |
+| `gemma4:12b` | ~7.7 GB | ~8 GB | Needs a larger GPU |
 
 ### Verify Ollama is Running
 
@@ -92,9 +93,9 @@ S3_SECRET_KEY=minioadmin
 # Qdrant
 QDRANT_URL=http://localhost:6333
 
-# Ollama (for Gemma2 NLU)
+# Ollama (for Gemma 4 NLU)
 OLLAMA_URL=http://localhost:11434
-OLLAMA_MODEL=gemma2:2b
+OLLAMA_MODEL=gemma4:e2b
 
 # JWT
 JWT_SECRET=change-me-in-production
@@ -166,9 +167,9 @@ No manual model downloads needed. Models download on first use:
 | `yolo11n.pt` | ultralytics | ~6 MB | First image detection |
 | `google/siglip-base-patch16-224` | HuggingFace | ~350 MB | First embedding call |
 | `facebook/dinov2-base` | HuggingFace | ~450 MB | First DINOv2 embedding |
-| `gemma2:2b` | Ollama registry | ~1.6 GB | `ollama pull` (manual) |
+| `gemma4:e2b` | Ollama registry | ~4.6 GB | `ollama pull` (manual) |
 
-**Total model download: ~2.4 GB**
+**Total model download: ~5.4 GB**
 
 ---
 
@@ -179,9 +180,9 @@ No manual model downloads needed. Models download on first use:
 | YOLOv11 detection | ~0.5 GB | ~0.3s per image |
 | SigLIP embedding | ~1 GB | ~0.2s per image |
 | DINOv2 embedding | ~1.5 GB | ~0.3s per image |
-| Gemma2:2b NLU | ~2 GB | ~1-3s per query |
+| Gemma4:e2b NLU | ~5 GB | ~1-3s per query |
 
-**Total peak VRAM: ~5 GB** (fits in 6GB)
+**Total peak VRAM: ~5-6 GB** (tight on 6GB)
 
 ---
 
@@ -207,7 +208,7 @@ python -c "import httpx; r = httpx.get('http://localhost:11434/api/tags'); print
 
 ### "CUDA out of memory"
 - Close other GPU apps (Chrome, Discord)
-- Use `gemma2:2b` instead of `gemma2:9b`
+- Use `gemma4:e2b` instead of larger Gemma 4 variants
 
 ### "ultralytics not installed"
 - Run: `pip install ultralytics`
